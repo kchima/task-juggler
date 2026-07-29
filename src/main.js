@@ -85,12 +85,18 @@ export function mountApp(doc, app, options = {}) {
     }
     statusEl.textContent = `${statusPrefix}…`;
     try {
-      const [refreshResult, discoverResult] = await Promise.all([app.refreshAll(), app.discoverNewTasks()]);
-      const aiCalls = refreshResult.results.filter((r) => r.aiCalled).length;
+      const [refreshResult, discoverResult, slackResult] = await Promise.all([
+        app.refreshAll(), app.discoverNewTasks(), app.runSlackTriage(),
+      ]);
+      const aiCalls = refreshResult.results.filter((r) => r.aiCalled).length + (slackResult.aiCalled ? 1 : 0);
       const addedNote = discoverResult.added ? `, ${discoverResult.added} new` : '';
+      const slackNote = slackResult.scanned
+        ? `, Slack: ${slackResult.scanned} scanned/${slackResult.ongoing} ongoing/${slackResult.updated} updated/${slackResult.skippedResolved} resolved`
+        : '';
+      const errorNote = discoverResult.sessionDiscoveryError ? ' — Claude session ingestion disabled (unexpected response shape)' : '';
       statusEl.textContent = refreshResult.skipped
         ? 'Just refreshed'
-        : `${statusPrefix}ed (${aiCalls} AI call${aiCalls === 1 ? '' : 's'}${addedNote})`;
+        : `${statusPrefix}ed (${aiCalls} AI call${aiCalls === 1 ? '' : 's'}${addedNote}${slackNote})${errorNote}`;
     } catch (err) {
       // A failing connector must never take the list down with it.
       statusEl.textContent = `Refresh failed: ${err?.message ?? 'unknown error'}`;

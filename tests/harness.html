@@ -53,20 +53,25 @@
     },
     async askClaude(prompt) {
       console.log('[mock askClaude]', prompt.slice(0, 120) + '…');
-      if (prompt.includes('triaging a Slack thread')) {
-        return JSON.stringify({ needsAttention: true, reason: 'Priya asked Dana to review pricing copy' });
+      if (prompt.includes('triaging a batch of Slack threads')) {
+        const keys = [...prompt.matchAll(/--- Thread (\S+) ---/g)].map((m) => m[1]);
+        const verdicts = keys.map((threadKey) => (
+          threadKey.includes(MOCK_SLACK_DISCOVERY_THREAD.channelId)
+            ? {
+              threadKey, isOngoing: true, ballInUsersCourt: true, waitingOn: 'user',
+              status: 'not_started', summary: 'Priya asked Dana to review pricing copy', reason: 'unanswered request',
+            }
+            : {
+              threadKey, isOngoing: true, ballInUsersCourt: true, waitingOn: 'user',
+              status: 'waiting_other', summary: 'Devin asked whether to add the release to the changelog.', reason: 'unanswered bot question',
+            }
+        ));
+        return JSON.stringify(verdicts);
       }
       if (prompt.includes('triaging the tail of an AI')) {
         return JSON.stringify({
           needsAttention: true, waitingOn: 'user',
           reason: 'Needs you to submit the W-9 tax form',
-        });
-      }
-      if (prompt.includes('Want me to add this release')) {
-        return JSON.stringify({
-          status: 'waiting_other', summary: 'Devin asked whether to add the release to the changelog.',
-          nextAction: 'Reply yes/no on the changelog question', waitingOn: 'user',
-          ballInUsersCourt: true, estRemaining: 'small', done: false,
         });
       }
       return JSON.stringify({

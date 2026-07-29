@@ -196,13 +196,7 @@ describe('createApp.discoverNewTasks', () => {
   let storage;
   beforeEach(() => { storage = fakeStorage(); });
 
-  const REAL_ISH_SLACK_SEARCH_TEXT = [
-    'Channel: #engineering (ID: C01EXAMPLE1)',
-    'From: Devin (ID: U03EXAMPLE3)  [BOT]',
-    'Permalink: [link](https://acme.slack.com/archives/C01EXAMPLE1/p1784833812477119?thread_ts=1784829904.373009&cid=C01EXAMPLE1)',
-  ].join('\n');
-
-  function mockCallMcpTool({ linearIssues = [], todoistTasks = [], slackSearchText = '' } = {}) {
+  function mockCallMcpTool({ linearIssues = [], todoistTasks = [] } = {}) {
     return vi.fn(async (name) => {
       if (name === `${TOOL_NAMES.linearWorkspaces.Acme}list_issues`) {
         return { structuredContent: { issues: linearIssues }, isError: false };
@@ -210,15 +204,17 @@ describe('createApp.discoverNewTasks', () => {
       if (name === TOOL_NAMES.todoistFindTasks) {
         return { structuredContent: { tasks: todoistTasks }, isError: false };
       }
-      if (name === TOOL_NAMES.slackSearch) {
-        return { content: [{ text: slackSearchText }], isError: false };
-      }
-      if (name === TOOL_NAMES.slackReadThread) {
-        return { content: [{ text: slackThread.rawText }], isError: false };
-      }
       throw new Error(`unexpected tool call: ${name}`);
     });
   }
+
+  it('never touches Slack — that is runSlackTriage\'s job now, not discoverNewTasks\'', async () => {
+    const callMcpTool = mockCallMcpTool();
+    const app = createApp({ storage, callMcpTool, askClaude: vi.fn(), toolNames: TOOL_NAMES });
+    await app.discoverNewTasks();
+    expect(callMcpTool).not.toHaveBeenCalledWith(TOOL_NAMES.slackSearch, expect.anything());
+    expect(callMcpTool).not.toHaveBeenCalledWith(TOOL_NAMES.slackReadThread, expect.anything());
+  });
 
   it('adds an unresolved Linear issue assigned to me as a candidate task', async () => {
     const callMcpTool = mockCallMcpTool({ linearIssues: [{ ...acmeIssue, statusType: 'triage' }] });
@@ -250,41 +246,6 @@ describe('createApp.discoverNewTasks', () => {
     expect(app.getTasks()[0].sourceRef.taskId).toBe('T1');
   });
 
-  it('adds a Slack thread only when the AI judgment says it needs attention', async () => {
-    const callMcpTool = mockCallMcpTool({ slackSearchText: REAL_ISH_SLACK_SEARCH_TEXT });
-    const askClaude = vi.fn().mockResolvedValue(JSON.stringify({ needsAttention: true, reason: 'Devin asked a question' }));
-    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
-    const { added } = await app.discoverNewTasks();
-    expect(added).toBe(1);
-    const task = app.getTasks()[0];
-    expect(task.source).toBe('slack');
-    expect(task.sourceRef).toEqual({
-      channelId: 'C01EXAMPLE1',
-      threadTs: '1784829904.373009',
-      workspaceDomain: 'acme.slack.com',
-    });
-    expect(task.title).toBe('Devin asked a question');
-  });
-
-  it('does not add a Slack thread the AI judges as not needing attention', async () => {
-    const callMcpTool = mockCallMcpTool({ slackSearchText: REAL_ISH_SLACK_SEARCH_TEXT });
-    const askClaude = vi.fn().mockResolvedValue(JSON.stringify({ needsAttention: false, reason: 'already resolved' }));
-    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
-    const { added } = await app.discoverNewTasks();
-    expect(added).toBe(0);
-  });
-
-  it('does not re-classify (no askClaude call) a Slack thread already tracked', async () => {
-    storage.setItem('task-juggler:tasks:v1', JSON.stringify([
-      linearTask({ id: 'existing-slack', source: 'slack', sourceRef: { channelId: 'C01EXAMPLE1', threadTs: '1784829904.373009' } }),
-    ]));
-    const callMcpTool = mockCallMcpTool({ slackSearchText: REAL_ISH_SLACK_SEARCH_TEXT });
-    const askClaude = vi.fn();
-    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
-    await app.discoverNewTasks();
-    expect(askClaude).not.toHaveBeenCalled();
-  });
-
   it('running discoverNewTasks twice does not duplicate candidates', async () => {
     const callMcpTool = mockCallMcpTool({ linearIssues: [{ ...acmeIssue, statusType: 'triage' }] });
     const app = createApp({ storage, callMcpTool, askClaude: vi.fn(), toolNames: TOOL_NAMES });
@@ -292,5 +253,193 @@ describe('createApp.discoverNewTasks', () => {
     const second = await app.discoverNewTasks();
     expect(second.added).toBe(0);
     expect(app.getTasks()).toHaveLength(1);
+  });
+});
+
+describe('createApp.runSlackTriage', () => {
+  let storage;
+  beforeEach(() => { storage = fakeStorage(); });
+
+  const REAL_ISH_SLACK_SEARCH_TEXT = [
+    'Channel: #engineering (ID: C01EXAMPLE1)',
+    'From: Devin (ID: U03EXAMPLE3)  [BOT]',
+    'Permalink: [link](https://acme.slack.com/archives/C01EXAMPLE1/p1784833812477119?thread_ts=1784829904.373009&cid=C01EXAMPLE1)',
+  ].join('\n');
+
+  const ONGOING_VERDICT = [{
+    threadKey: 'slack:C01EXAMPLE1:1784829904.373009',
+    isOngoing: true, ballInUsersCourt: true, waitingOn: 'user',
+    status: 'in_progress', summary: 'Devin is waiting on a go/no-go', reason: 'unanswered bot question',
+  }];
+  const RESOLVED_VERDICT = [{
+    threadKey: 'slack:C01EXAMPLE1:1784829904.373009',
+    isOngoing: false, ballInUsersCourt: false, waitingOn: null,
+    status: 'completed', summary: 'All set, thread resolved', reason: 'thanked and confirmed',
+  }];
+
+  function mockCallMcpTool({ rawText = slackThread.rawText } = {}) {
+    return vi.fn(async (name, args) => {
+      if (name === TOOL_NAMES.slackSearch) {
+        return { content: [{ text: REAL_ISH_SLACK_SEARCH_TEXT }], isError: false };
+      }
+      if (name === TOOL_NAMES.slackReadThread) {
+        return { content: [{ text: rawText }], isError: false };
+      }
+      throw new Error(`unexpected tool call: ${name} ${JSON.stringify(args)}`);
+    });
+  }
+
+  it('queries Slack with two plain single-clause searches, never a combined OR/paren query', async () => {
+    const callMcpTool = mockCallMcpTool();
+    const app = createApp({ storage, callMcpTool, askClaude: vi.fn().mockResolvedValue(JSON.stringify(ONGOING_VERDICT)), toolNames: TOOL_NAMES });
+    await app.runSlackTriage({ force: true });
+    const searchCalls = callMcpTool.mock.calls.filter(([name]) => name === TOOL_NAMES.slackSearch);
+    expect(searchCalls).toHaveLength(2);
+    for (const [, args] of searchCalls) {
+      expect(args.query).not.toContain('(');
+      expect(args.query).not.toContain('OR');
+    }
+  });
+
+  it('adds a new task from an untracked thread the batch verdict calls ongoing', async () => {
+    const callMcpTool = mockCallMcpTool();
+    const askClaude = vi.fn().mockResolvedValue(JSON.stringify(ONGOING_VERDICT));
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
+    const result = await app.runSlackTriage({ force: true });
+
+    expect(askClaude).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ scanned: 1, ongoing: 1, added: 1, updated: 0, skippedResolved: 0 });
+    const task = app.getTasks()[0];
+    expect(task.source).toBe('slack');
+    expect(task.sourceRef).toEqual({ channelId: 'C01EXAMPLE1', threadTs: '1784829904.373009', workspaceDomain: 'acme.slack.com' });
+    expect(task.summary).toBe('Devin is waiting on a go/no-go');
+  });
+
+  it('never adds an untracked thread the batch verdict calls resolved — only already-tracked tasks get marked completed', async () => {
+    const callMcpTool = mockCallMcpTool();
+    const askClaude = vi.fn().mockResolvedValue(JSON.stringify(RESOLVED_VERDICT));
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
+    const result = await app.runSlackTriage({ force: true });
+
+    expect(result).toMatchObject({ scanned: 1, ongoing: 0, added: 0, skippedResolved: 1 });
+    expect(app.getTasks()).toHaveLength(0);
+  });
+
+  it('patches an already-tracked Slack task in place instead of adding a duplicate', async () => {
+    storage.setItem('task-juggler:tasks:v1', JSON.stringify([
+      linearTask({
+        id: 'existing-slack', source: 'slack',
+        sourceRef: { channelId: 'C01EXAMPLE1', threadTs: '1784829904.373009' },
+        contextHash: 'stale-hash', status: 'not_started',
+      }),
+    ]));
+    const callMcpTool = mockCallMcpTool();
+    const askClaude = vi.fn().mockResolvedValue(JSON.stringify(RESOLVED_VERDICT));
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
+    const result = await app.runSlackTriage({ force: true });
+
+    expect(result).toMatchObject({ scanned: 1, updated: 1, added: 0, skippedResolved: 0 });
+    expect(app.getTasks()).toHaveLength(1);
+    const task = app.getTasks()[0];
+    expect(task.id).toBe('existing-slack');
+    expect(task.status).toBe('completed');
+    expect(task.summary).toBe('All set, thread resolved');
+  });
+
+  it('does not override status on a patch when userPinnedStatus is true', async () => {
+    storage.setItem('task-juggler:tasks:v1', JSON.stringify([
+      linearTask({
+        id: 'pinned-slack', source: 'slack',
+        sourceRef: { channelId: 'C01EXAMPLE1', threadTs: '1784829904.373009' },
+        contextHash: 'stale-hash', status: 'waiting_other', userPinnedStatus: true,
+      }),
+    ]));
+    const callMcpTool = mockCallMcpTool();
+    const askClaude = vi.fn().mockResolvedValue(JSON.stringify(ONGOING_VERDICT));
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
+    await app.runSlackTriage({ force: true });
+    expect(app.getTasks()[0].status).toBe('waiting_other');
+    expect(app.getTasks()[0].summary).toBe('Devin is waiting on a go/no-go');
+  });
+
+  it('makes zero askClaude calls when a tracked thread\'s content hash is unchanged', async () => {
+    const { djb2Hash } = await import('../src/hash.js');
+    const { normalizeSlackThread } = await import('../src/normalize.js');
+    const matchingHash = djb2Hash(normalizeSlackThread(slackThread.rawText));
+    storage.setItem('task-juggler:tasks:v1', JSON.stringify([
+      linearTask({
+        id: 'unchanged-slack', source: 'slack',
+        sourceRef: { channelId: 'C01EXAMPLE1', threadTs: '1784829904.373009' },
+        contextHash: matchingHash,
+      }),
+    ]));
+    const callMcpTool = mockCallMcpTool();
+    const askClaude = vi.fn();
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
+    const result = await app.runSlackTriage({ force: true });
+    expect(askClaude).not.toHaveBeenCalled();
+    expect(result.aiCalled).toBe(false);
+    expect(result.scanned).toBe(1);
+  });
+
+  it('does not re-classify an untracked resolved thread on a second scan (watermarked)', async () => {
+    const callMcpTool = mockCallMcpTool();
+    const askClaude = vi.fn().mockResolvedValue(JSON.stringify(RESOLVED_VERDICT));
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
+    await app.runSlackTriage({ force: true });
+    askClaude.mockClear();
+    const second = await app.runSlackTriage({ force: true });
+    expect(askClaude).not.toHaveBeenCalled();
+    expect(second.aiCalled).toBe(false);
+  });
+
+  it('leaves a thread the model dropped from its response untouched, without watermarking it (so it is retried, not stuck)', async () => {
+    storage.setItem('task-juggler:tasks:v1', JSON.stringify([
+      linearTask({
+        id: 'dropped-slack', source: 'slack',
+        sourceRef: { channelId: 'C01EXAMPLE1', threadTs: '1784829904.373009' },
+        contextHash: 'stale-hash', status: 'not_started', summary: 'old summary',
+      }),
+    ]));
+    const callMcpTool = mockCallMcpTool();
+    const askClaude = vi.fn().mockResolvedValue(JSON.stringify([])); // model returned an empty array — dropped the one thread
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
+    const result = await app.runSlackTriage({ force: true });
+    expect(result.unparsed).toBe(1);
+    expect(app.getTasks()[0].summary).toBe('old summary');
+
+    askClaude.mockClear();
+    askClaude.mockResolvedValue(JSON.stringify(ONGOING_VERDICT));
+    const second = await app.runSlackTriage({ force: true });
+    expect(askClaude).toHaveBeenCalledTimes(1); // retried, not permanently skipped
+    expect(second.updated).toBe(1);
+  });
+
+  it('is debounced independently from refreshAll: a second call within 30s without force is skipped', async () => {
+    const callMcpTool = mockCallMcpTool();
+    const askClaude = vi.fn().mockResolvedValue(JSON.stringify(ONGOING_VERDICT));
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
+    await app.runSlackTriage({ force: true });
+    callMcpTool.mockClear();
+    const second = await app.runSlackTriage();
+    expect(second.skipped).toBe(true);
+    expect(callMcpTool).not.toHaveBeenCalled();
+  });
+
+  it('refreshOne on a tracked Slack task routes through the same batch classifier as a single-item batch', async () => {
+    storage.setItem('task-juggler:tasks:v1', JSON.stringify([
+      linearTask({
+        id: 'refresh-one-slack', source: 'slack',
+        sourceRef: { channelId: 'C01EXAMPLE1', threadTs: '1784829904.373009' },
+        contextHash: 'stale-hash',
+      }),
+    ]));
+    const callMcpTool = mockCallMcpTool();
+    const askClaude = vi.fn().mockResolvedValue(JSON.stringify(ONGOING_VERDICT));
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
+    const { task, aiCalled } = await app.refreshOne('refresh-one-slack');
+    expect(aiCalled).toBe(true);
+    expect(task.summary).toBe('Devin is waiting on a go/no-go');
+    expect(callMcpTool).not.toHaveBeenCalledWith(TOOL_NAMES.slackSearch, expect.anything());
   });
 });

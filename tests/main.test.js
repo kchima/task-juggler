@@ -19,6 +19,9 @@ function fakeApp(overrides = {}) {
     refreshAll: vi.fn().mockResolvedValue({ skipped: false, results: [] }),
     refreshOne: vi.fn().mockResolvedValue(null),
     discoverNewTasks: vi.fn().mockResolvedValue({ added: 0 }),
+    runSlackTriage: vi.fn().mockResolvedValue({
+      skipped: false, scanned: 0, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false,
+    }),
     addManualTask: vi.fn(),
     addByLink: vi.fn(),
     cycleStatusManual: vi.fn(),
@@ -89,6 +92,35 @@ describe('mountApp', () => {
     await Promise.resolve();
     expect(app.discoverNewTasks).toHaveBeenCalledTimes(1);
     expect(document.getElementById('jg-status').textContent).toContain('2 new');
+  });
+
+  it('clicking Refresh also calls runSlackTriage and reports its counts in the status line', async () => {
+    const app = fakeApp({
+      runSlackTriage: vi.fn().mockResolvedValue({
+        skipped: false, scanned: 3, ongoing: 2, updated: 1, added: 1, skippedResolved: 1, unparsed: 0, aiCalled: true,
+      }),
+    });
+    mountApp(document, app);
+    document.getElementById('jg-refresh-btn').click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(app.runSlackTriage).toHaveBeenCalledTimes(1);
+    const status = document.getElementById('jg-status').textContent;
+    expect(status).toContain('3 scanned');
+    expect(status).toContain('2 ongoing');
+    expect(status).toContain('1 updated');
+    expect(status).toContain('1 resolved');
+  });
+
+  it('surfaces a disabled-Claude-session-ingestion note when discoverNewTasks reports a shape mismatch, without hiding the rest of the status', async () => {
+    const app = fakeApp({
+      discoverNewTasks: vi.fn().mockResolvedValue({ added: 0, sessionDiscoveryError: 'list_sessions returned an unrecognized shape' }),
+    });
+    mountApp(document, app);
+    document.getElementById('jg-refresh-btn').click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(document.getElementById('jg-status').textContent).toContain('Claude session ingestion disabled');
   });
 
   it('in offline mode, refresh does not call the app and says so instead of throwing', async () => {

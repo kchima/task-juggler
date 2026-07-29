@@ -4,9 +4,9 @@ import {
   todoistCandidateToTask,
   isUnresolvedLinearIssue,
   linearCandidateToTask,
-  buildSlackJudgmentPrompt,
-  parseSlackJudgment,
-  slackCandidateToTask,
+  buildSlackRecentQueries,
+  buildSlackBatchPrompt,
+  parseSlackBatchVerdicts,
   extractSlackThreadRefs,
 } from '../src/discovery.js';
 import acmeIssue from './fixtures/linear-acme-issue.json' with { type: 'json' };
@@ -95,40 +95,81 @@ describe('linearCandidateToTask', () => {
   });
 });
 
-describe('Slack judgment classification', () => {
-  it('buildSlackJudgmentPrompt embeds the raw thread text and demands strict JSON', () => {
-    const prompt = buildSlackJudgmentPrompt('some real thread text');
-    expect(prompt).toContain('some real thread text');
-    expect(prompt.toLowerCase()).toContain('json');
+describe('buildSlackRecentQueries', () => {
+  it('produces two plain single-clause queries, never a combined OR/paren query', () => {
+    const queries = buildSlackRecentQueries(new Date('2026-07-29T12:00:00Z'));
+    expect(queries).toEqual(['is:thread to:me after:2026-07-28', 'is:thread from:me after:2026-07-28']);
+    for (const q of queries) {
+      expect(q).not.toContain('(');
+      expect(q).not.toContain('OR');
+    }
   });
+});
 
-  it('parseSlackJudgment parses a clean response', () => {
-    const parsed = parseSlackJudgment(JSON.stringify({ needsAttention: true, reason: 'Devin asked a question' }));
-    expect(parsed).toEqual({ needsAttention: true, reason: 'Devin asked a question' });
+describe('buildSlackBatchPrompt', () => {
+  it('embeds every thread keyed by threadKey and demands a JSON array', () => {
+    const prompt = buildSlackBatchPrompt([
+      { threadKey: 'slack:C01:111.111', rawText: 'Devin: should I ship this?' },
+      { threadKey: 'slack:C02:222.222', rawText: 'Priya: thanks, all set' },
+    ]);
+    expect(prompt).toContain('slack:C01:111.111');
+    expect(prompt).toContain('Devin: should I ship this?');
+    expect(prompt).toContain('slack:C02:222.222');
+    expect(prompt).toContain('Priya: thanks, all set');
+    expect(prompt.toLowerCase()).toContain('json array');
   });
+});
 
-  it('parseSlackJudgment strips a code fence', () => {
-    const fenced = '```json\n' + JSON.stringify({ needsAttention: false, reason: 'resolved' }) + '\n```';
-    expect(parseSlackJudgment(fenced)).toEqual({ needsAttention: false, reason: 'resolved' });
-  });
+describe('parseSlackBatchVerdicts', () => {
+  const validEntry = {
+    threadKey: 'slack:C01:111.111',
+    isOngoing: true,
+    ballInUsersCourt: true,
+    waitingOn: 'user',
+    status: 'in_progress',
+    summary: 'Devin is waiting on a go/no-go',
+    reason: 'unanswered question from a bot counterpart',
+  };
 
-  it('parseSlackJudgment returns null for malformed JSON', () => {
-    expect(parseSlackJudgment('not json')).toBeNull();
-  });
-
-  it('parseSlackJudgment returns null when needsAttention is missing or not boolean', () => {
-    expect(parseSlackJudgment(JSON.stringify({ reason: 'x' }))).toBeNull();
-    expect(parseSlackJudgment(JSON.stringify({ needsAttention: 'yes', reason: 'x' }))).toBeNull();
-  });
-
-  it('slackCandidateToTask shapes a real captured thread into a candidate task', () => {
-    const task = slackCandidateToTask({
-      channelId: 'C01EXAMPLE1',
-      threadTs: '1784829904.373009',
-      title: 'Devin asked whether to add the release to the changelog',
+  it('parses a clean array response into a Map keyed by threadKey', () => {
+    const verdicts = parseSlackBatchVerdicts(JSON.stringify([validEntry]));
+    expect(verdicts.get('slack:C01:111.111')).toEqual({
+      isOngoing: true,
+      ballInUsersCourt: true,
+      waitingOn: 'user',
+      status: 'in_progress',
+      summary: 'Devin is waiting on a go/no-go',
+      reason: 'unanswered question from a bot counterpart',
     });
-    expect(task.source).toBe('slack');
-    expect(task.sourceRef).toEqual({ channelId: 'C01EXAMPLE1', threadTs: '1784829904.373009' });
+  });
+
+  it('strips a code fence around the array', () => {
+    const fenced = '```json\n' + JSON.stringify([validEntry]) + '\n```';
+    expect(parseSlackBatchVerdicts(fenced).size).toBe(1);
+  });
+
+  it('drops an individual malformed entry without discarding the rest of the batch', () => {
+    const resolvedEntry = { ...validEntry, threadKey: 'slack:C02:222.222', isOngoing: false, status: 'completed' };
+    const malformed = { threadKey: 'slack:C03:333.333' }; // missing isOngoing/status
+    const verdicts = parseSlackBatchVerdicts(JSON.stringify([validEntry, malformed, resolvedEntry]));
+    expect(verdicts.size).toBe(2);
+    expect(verdicts.has('slack:C03:333.333')).toBe(false);
+    expect(verdicts.get('slack:C02:222.222').isOngoing).toBe(false);
+  });
+
+  it('rejects an unrecognized status value', () => {
+    const verdicts = parseSlackBatchVerdicts(JSON.stringify([{ ...validEntry, status: 'archived' }]));
+    expect(verdicts.size).toBe(0);
+  });
+
+  it('normalizes waitingOn to null when neither "user" nor "them"', () => {
+    const verdicts = parseSlackBatchVerdicts(JSON.stringify([{ ...validEntry, waitingOn: 'someone_else' }]));
+    expect(verdicts.get('slack:C01:111.111').waitingOn).toBeNull();
+  });
+
+  it('returns null for a response that is not a JSON array at all', () => {
+    expect(parseSlackBatchVerdicts('not json')).toBeNull();
+    expect(parseSlackBatchVerdicts(JSON.stringify({ threadKey: 'x' }))).toBeNull();
   });
 });
 

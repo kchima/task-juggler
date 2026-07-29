@@ -40,17 +40,6 @@ export function linearCandidateToTask(issue, workspaceLabel) {
   };
 }
 
-export function buildSlackJudgmentPrompt(threadRawText) {
-  return [
-    "You are triaging a Slack thread to decide if it's an open loop that still needs the user's attention.",
-    'Respond with STRICT JSON ONLY — no prose, no markdown code fences — matching exactly:',
-    '{"needsAttention": true, "reason": "one short sentence"}',
-    "A thread needs attention if its last substantive message is a question or request directed at the user, or the thread is otherwise clearly unresolved.",
-    'A thread does NOT need attention if it looks resolved (thanks / done / merged, a completion reaction) or the last message was purely informational with no open question.',
-    `Thread:\n${threadRawText}`,
-  ].join('\n');
-}
-
 // Named distinctly from aiClient.js's identical private helper — this build
 // concatenates all files into one flat script scope with no module
 // isolation, so two same-named top-level declarations across files is a
@@ -60,22 +49,72 @@ function stripSlackJsonCodeFences(text) {
   return text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
 }
 
-export function parseSlackJudgment(rawText) {
+// --- Slack batch triage ---------------------------------------------------
+// One prompt, one AI call for every thread that needs a look, instead of a
+// per-thread call. Two things drove this: per-thread calls made failures
+// (one throw, one bad-JSON parse) silently drop that single thread with zero
+// visibility, and N calls costs N times what a single batched classification
+// does for what is fundamentally a classification task, not N independent
+// reasoning tasks.
+
+// Slack's search syntax doesn't reliably support parenthesized boolean OR —
+// `is:thread (to:me OR from:me)` silently under-returns. Live-probe-verified:
+// plain single-clause queries (`is:thread to:me`, `is:thread from:me`) work.
+// Two simple queries beat one clever broken one.
+export function buildSlackRecentQueries(now = new Date()) {
+  // Slack's after: filter is day-granularity, not hour-granularity, so this
+  // is an approximate "yesterday onward" window, not a precise trailing 24h
+  // one — that imprecision is a known, accepted limitation, not a bug.
+  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const afterDate = yesterday.toISOString().slice(0, 10);
+  return [
+    `is:thread to:me after:${afterDate}`,
+    `is:thread from:me after:${afterDate}`,
+  ];
+}
+
+const VALID_SLACK_STATUS = new Set(['not_started', 'in_progress', 'waiting_other', 'waiting_ai', 'completed']);
+
+export function buildSlackBatchPrompt(threads) {
+  const body = threads.map((t) => `--- Thread ${t.threadKey} ---\n${t.rawText}`).join('\n\n');
+  return [
+    'You are triaging a batch of Slack threads. For EACH thread below, decide whether it represents an open loop that still needs attention.',
+    'Respond with STRICT JSON ONLY — a JSON array, no prose, no markdown code fences — one object per thread, in exactly this shape:',
+    '[{"threadKey":"<the exact key from the thread header>","isOngoing":true,"ballInUsersCourt":true,"waitingOn":"user"|"them"|null,"status":"not_started"|"in_progress"|"waiting_other"|"waiting_ai"|"completed","summary":"one short sentence","reason":"one short sentence"}]',
+    'isOngoing is false only if the thread reads as resolved/done (thanks, merged, confirmed, no open question). Otherwise true.',
+    'Treat a bot/agent participant (Devin or similar) exactly like a human participant for "waiting on them" purposes — an unanswered question FROM an agent is exactly as actionable as one from a person.',
+    'Return exactly one object per thread below, using each threadKey EXACTLY as given in its header — do not invent, merge, or omit keys.',
+    `Threads:\n${body}`,
+  ].join('\n');
+}
+
+// Individual malformed entries are dropped, not the whole batch — one bad
+// object from the model must not cost every other thread in the same call
+// its verdict. Returns null only if the whole response isn't valid JSON.
+export function parseSlackBatchVerdicts(rawText) {
+  let parsed;
   try {
-    const parsed = JSON.parse(stripSlackJsonCodeFences(rawText));
-    if (typeof parsed.needsAttention !== 'boolean') return null;
-    return { needsAttention: parsed.needsAttention, reason: typeof parsed.reason === 'string' ? parsed.reason : '' };
+    parsed = JSON.parse(stripSlackJsonCodeFences(rawText));
   } catch {
     return null;
   }
-}
+  if (!Array.isArray(parsed)) return null;
 
-export function slackCandidateToTask({ channelId, threadTs, title }) {
-  return {
-    title,
-    source: 'slack',
-    sourceRef: { channelId, threadTs },
-  };
+  const verdicts = new Map();
+  for (const entry of parsed) {
+    if (!entry || typeof entry.threadKey !== 'string') continue;
+    if (typeof entry.isOngoing !== 'boolean') continue;
+    if (!VALID_SLACK_STATUS.has(entry.status)) continue;
+    verdicts.set(entry.threadKey, {
+      isOngoing: entry.isOngoing,
+      ballInUsersCourt: Boolean(entry.ballInUsersCourt),
+      waitingOn: ['user', 'them'].includes(entry.waitingOn) ? entry.waitingOn : null,
+      status: entry.status,
+      summary: typeof entry.summary === 'string' ? entry.summary : '',
+      reason: typeof entry.reason === 'string' ? entry.reason : '',
+    });
+  }
+  return verdicts;
 }
 
 // Slack search results come back as a formatted text blob (not structured
