@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "task-juggler-local",
+  "description": "Local marketplace for sideloading the Task Juggler plugin during development.",
+  "owner": {
+    "name": "Kafe"
+  },
+  "plugins": [
+    {
+      "name": "task-juggler",
+      "description": "Personal workflow juggler: tracks in-flight Slack threads, Linear tickets, Todoist items, and Claude sessions, and surfaces the single best next thing to do.",
+      "author": {
+        "name": "Kafe"
+      },
+      "source": "./plugin/task-juggler",
+      "category": "productivity"
+    }
+  ]
+}

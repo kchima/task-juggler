@@ -1,0 +1,1225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Task Juggler</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: 16px; background: #fff; color: #111; }
+  @media (prefers-color-scheme: dark) { body { background: #16181c; color: #e8e8e8; } }
+  header { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; margin-right: auto; }
+  button { font: inherit; cursor: pointer; border: 1px solid #999; background: transparent; color: inherit; border-radius: 6px; padding: 4px 10px; }
+  button:hover { background: rgba(128,128,128,0.15); }
+  #jg-add-input { font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid #999; background: transparent; color: inherit; flex: 1; min-width: 160px; }
+  #jg-status { font-size: 12px; opacity: 0.7; }
+  .jg-row { display: flex; gap: 8px; align-items: center; padding: 6px 4px; border-bottom: 1px solid rgba(128,128,128,0.25); font-size: 14px; }
+  .jg-row-completed { opacity: 0.55; text-decoration: line-through; }
+  .jg-chip { font-size: 11px; padding: 2px 8px; white-space: nowrap; }
+  .jg-chip-waiting_ai, .jg-chip-waiting_other { opacity: 0.7; }
+  .jg-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; flex-shrink: 0; }
+  /* A linked title is a promise that clicking jumps to the real source. */
+  a.jg-title-linked { color: inherit; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px; cursor: pointer; }
+  a.jg-title-linked:hover { text-decoration-style: solid; color: #2f6feb; }
+  @media (prefers-color-scheme: dark) { a.jg-title-linked:hover { color: #7aa7ff; } }
+  .jg-card-title { text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 4px; }
+  .jg-summary { opacity: 0.75; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .jg-badge { font-size: 11px; padding: 2px 6px; border-radius: 10px; border: 1px solid rgba(128,128,128,0.5); white-space: nowrap; flex-shrink: 0; }
+  .jg-badge-user { border-color: #d08700; color: #d08700; font-weight: 600; }
+  .jg-completed-header { font-size: 12px; opacity: 0.6; margin: 10px 0 4px; }
+  .jg-refresh, .jg-delete, .jg-reopen { flex-shrink: 0; }
+  .jg-card { border: 1px solid rgba(128,128,128,0.35); border-radius: 10px; padding: 16px; max-width: 480px; }
+  .jg-card h2 { margin: 0 0 8px; font-size: 18px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Task Juggler</h1>
+  <input id="jg-add-input" type="text" placeholder="Add a task, or paste a Slack/Linear/any link…" />
+  <button id="jg-add-btn">Add</button>
+  <button id="jg-view-toggle">Toggle view</button>
+  <button id="jg-refresh-btn">Refresh</button>
+  <span id="jg-status"></span>
+</header>
+<div id="jg-list"></div>
+<div id="jg-card" hidden></div>
+<script id="juggler-seed" type="application/json"></script>
+<script type="module">
+// --- id.js ---
+function generateId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+
+// --- hash.js ---
+function djb2Hash(str) {
+  let hash = 5381;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) + hash + str.charCodeAt(i)) >>> 0;
+  }
+  return hash.toString(16);
+}
+
+
+// --- normalize.js ---
+function normalizeLinearIssue(issue) {
+  const canonical = {
+    status: issue?.status ?? null,
+    statusType: issue?.statusType ?? null,
+    assignee: issue?.assignee ?? null,
+    priority: issue?.priority?.name ?? null,
+    dueDate: issue?.dueDate ?? null,
+    labels: [...(issue?.labels ?? [])].sort(),
+    title: issue?.title ?? null,
+    updatedAt: issue?.updatedAt ?? null,
+  };
+  return JSON.stringify(canonical, Object.keys(canonical).sort());
+}
+
+function normalizeSlackThread(rawText) {
+  return typeof rawText === 'string' ? rawText.trim() : '';
+}
+
+
+// --- scoring.js ---
+const EST_BOOST = { small: 30, medium: 15, large: 0 };
+const PRIORITY_BOOST = { urgent: 20, high: 12, medium: 6, low: 0 };
+
+function dueProximityBoost(dueDate, now) {
+  if (!dueDate) return 0;
+  const days = (new Date(dueDate) - now) / (1000 * 60 * 60 * 24);
+  if (days <= 0) return 40;
+  if (days <= 2) return 25;
+  if (days <= 7) return 10;
+  return 0;
+}
+
+function stalenessNudge(updatedAt, now) {
+  if (!updatedAt) return 0;
+  const hours = (now - new Date(updatedAt)) / (1000 * 60 * 60);
+  return Math.min(Math.max(hours, 0), 48) * 0.2;
+}
+
+function scoreTask(task, now = new Date()) {
+  return (
+    (task.ballInUsersCourt ? 100 : 0) +
+    (EST_BOOST[task.estRemaining] ?? 0) +
+    dueProximityBoost(task.dueDate, now) +
+    (PRIORITY_BOOST[(task.sourcePriority ?? '').toLowerCase()] ?? 0) +
+    stalenessNudge(task.updatedAt, now)
+  );
+}
+
+function tierOf(task) {
+  if (task.status === 'not_started' || task.status === 'in_progress') return 0;
+  if (task.status === 'waiting_other' || task.status === 'waiting_ai') return 1;
+  return 2;
+}
+
+function sortTasks(tasks, now = new Date()) {
+  return [...tasks]
+    .filter((t) => tierOf(t) !== 2)
+    .sort((a, b) => tierOf(a) - tierOf(b) || scoreTask(b, now) - scoreTask(a, now));
+}
+
+function completedTasks(tasks) {
+  return tasks.filter((t) => t.status === 'completed');
+}
+
+
+// --- urlParser.js ---
+const SLACK_PERMALINK_RE = /^https:\/\/[\w-]+\.slack\.com\/archives\/([A-Z0-9]+)\/p(\d+)/;
+const LINEAR_ISSUE_RE = /^https:\/\/linear\.app\/([\w-]+)\/issue\/([A-Za-z]+-\d+)/;
+const DEVIN_SESSION_RE = /^https:\/\/app\.devin\.ai\/sessions\/[\w-]+/;
+
+function parseLink(url) {
+  const slackMatch = url.match(SLACK_PERMALINK_RE);
+  if (slackMatch) {
+    const [, channelId, digits] = slackMatch;
+    const threadTs = `${digits.slice(0, -6)}.${digits.slice(-6)}`;
+    return { source: 'slack', sourceRef: { channelId, threadTs, url } };
+  }
+
+  const linearMatch = url.match(LINEAR_ISSUE_RE);
+  if (linearMatch) {
+    const [, workspaceLabel, issueId] = linearMatch;
+    return { source: 'linear', sourceRef: { workspaceLabel, issueId, url } };
+  }
+
+  if (DEVIN_SESSION_RE.test(url)) {
+    return { source: 'devin', sourceRef: { url } };
+  }
+
+  return { source: 'url', sourceRef: { url } };
+}
+
+
+// --- taskKey.js ---
+// Single canonical identity for a task across every subsystem: seed merge
+// dedup, dismissal, and discovery watermarks all key off this. Lives in its
+// own module so seedMerge/discovery/app can share one definition — the
+// concatenating build has no module isolation, so two copies of a function
+// named sourceRefKey in different files would be a hard SyntaxError.
+function sourceRefKey(task) {
+  const ref = task.sourceRef ?? {};
+  if (task.source === 'slack') return `slack:${ref.channelId}:${ref.threadTs}`;
+  if (task.source === 'linear') return `linear:${ref.workspaceLabel}:${ref.issueId}`;
+  if (task.source === 'todoist') return `todoist:${ref.taskId}`;
+  if (task.source === 'claude_session') return `claude_session:${ref.sessionId}`;
+  if (task.source === 'claude_code_session') return `claude_code_session:${ref.sessionId}`;
+  if (ref.url) return `url:${ref.url}`;
+  return `manual:${task.id}`;
+}
+
+
+// --- sourceLinks.js ---
+// Resolves a task to the place the work actually lives, so a title can be
+// clicked to jump straight back into context.
+//
+// Only builds links this project has actually verified. A source with no
+// known-good URL scheme returns null rather than a plausible-looking guess —
+// a link that silently does nothing is worse than no link, because the user
+// can't tell the difference until they need it.
+
+// Set once the Claude Desktop per-session deep-link path is confirmed. The
+// `claude://` scheme IS registered by the desktop app (verified in
+// Claude.app/Contents/Info.plist), but the path format for opening a
+// specific session was not discoverable from the app bundle, so this stays
+// off by default. To enable: set this to a template containing {sessionId},
+// e.g. 'claude://session/{sessionId}', and verify by running
+//   open "claude://<whatever>/<a-real-session-id>"
+// in a terminal — if the app focuses that session, the template is right.
+const CLAUDE_SESSION_LINK_TEMPLATE = null;
+
+function sourceLinkFor(task, { claudeSessionTemplate = CLAUDE_SESSION_LINK_TEMPLATE } = {}) {
+  const ref = task?.sourceRef ?? {};
+
+  // A URL captured at add-by-link time is always the most trustworthy thing
+  // we have — it came from the user or from a real permalink.
+  if (ref.url) return { url: ref.url, kind: task.source };
+
+  if (task?.source === 'slack' && ref.channelId && ref.threadTs) {
+    // Slack permalinks need the workspace domain; discovery captures it off
+    // the search-result permalink. Without it we can't build a valid link.
+    if (!ref.workspaceDomain) return null;
+    const tsDigits = ref.threadTs.replace('.', '');
+    return {
+      url: `https://${ref.workspaceDomain}/archives/${ref.channelId}/p${tsDigits}`,
+      kind: 'slack',
+    };
+  }
+
+  if (task?.source === 'linear' && ref.workspaceLabel && ref.issueId) {
+    return { url: `https://linear.app/${ref.workspaceLabel}/issue/${ref.issueId}`, kind: 'linear' };
+  }
+
+  if (task?.source === 'todoist' && ref.taskId) {
+    return { url: `https://app.todoist.com/app/task/${ref.taskId}`, kind: 'todoist' };
+  }
+
+  if (task?.source === 'claude_session' && ref.sessionId && claudeSessionTemplate) {
+    return { url: claudeSessionTemplate.replace('{sessionId}', ref.sessionId), kind: 'claude_session' };
+  }
+
+  return null;
+}
+
+// Stable per-task window name so clicking the same task twice refocuses the
+// tab it already opened instead of piling up duplicates. This is as close to
+// "reuse the existing tab" as a sandboxed page can get — it cannot focus a
+// tab it didn't open itself.
+function windowNameFor(task) {
+  return `jg-${task.source}-${task.id}`;
+}
+
+
+// --- discovery.js ---
+// Pure candidate-shaping and judgment logic for auto-detection ("deep scan").
+// app.js owns wiring real MCP tools + merging candidates into storage; this
+// module only decides "does this count" and "what does the resulting task
+// look like," so it's testable without mocking a tool-calling loop.
+
+// Todoist judgment gate: auto-include only when there's a clear, checkable
+// urgency signal — a due date today/overdue, or p1. No project/label
+// filtering; everything else is left out, full stop. This is a short-term
+// in-flight-work surface, not a to-do list — a blanket dump of Todoist would
+// defeat the point.
+function passesTodoistGate(todoistTask, now = new Date()) {
+  if (todoistTask.priority === 'p1') return true;
+  if (!todoistTask.dueDate) return false;
+  return new Date(todoistTask.dueDate) <= now;
+}
+
+function todoistCandidateToTask(todoistTask) {
+  return {
+    title: todoistTask.content,
+    source: 'todoist',
+    sourceRef: { taskId: todoistTask.id, projectId: todoistTask.projectId },
+    sourcePriority: todoistTask.priority === 'p1' ? 'urgent' : null,
+    dueDate: todoistTask.dueDate ?? null,
+  };
+}
+
+const LINEAR_UNRESOLVED_STATUS_TYPES = new Set(['backlog', 'unstarted', 'started', 'triage']);
+
+function isUnresolvedLinearIssue(issue) {
+  return LINEAR_UNRESOLVED_STATUS_TYPES.has(issue.statusType);
+}
+
+function linearCandidateToTask(issue, workspaceLabel) {
+  return {
+    title: issue.title,
+    source: 'linear',
+    sourceRef: { workspaceLabel, issueId: issue.id, url: issue.url },
+    sourcePriority: (issue.priority?.name ?? '').toLowerCase() || null,
+    dueDate: issue.dueDate ?? null,
+  };
+}
+
+function buildSlackJudgmentPrompt(threadRawText) {
+  return [
+    "You are triaging a Slack thread to decide if it's an open loop that still needs the user's attention.",
+    'Respond with STRICT JSON ONLY — no prose, no markdown code fences — matching exactly:',
+    '{"needsAttention": true, "reason": "one short sentence"}',
+    "A thread needs attention if its last substantive message is a question or request directed at the user, or the thread is otherwise clearly unresolved.",
+    'A thread does NOT need attention if it looks resolved (thanks / done / merged, a completion reaction) or the last message was purely informational with no open question.',
+    `Thread:\n${threadRawText}`,
+  ].join('\n');
+}
+
+// Named distinctly from aiClient.js's identical private helper — this build
+// concatenates all files into one flat script scope with no module
+// isolation, so two same-named top-level declarations across files is a
+// hard SyntaxError, not just a shadowing concern (see the build's
+// assertNoDuplicateTopLevelNames guard in build/inline.mjs).
+function stripSlackJsonCodeFences(text) {
+  return text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+}
+
+function parseSlackJudgment(rawText) {
+  try {
+    const parsed = JSON.parse(stripSlackJsonCodeFences(rawText));
+    if (typeof parsed.needsAttention !== 'boolean') return null;
+    return { needsAttention: parsed.needsAttention, reason: typeof parsed.reason === 'string' ? parsed.reason : '' };
+  } catch {
+    return null;
+  }
+}
+
+function slackCandidateToTask({ channelId, threadTs, title }) {
+  return {
+    title,
+    source: 'slack',
+    sourceRef: { channelId, threadTs },
+  };
+}
+
+// Slack search results come back as a formatted text blob (not structured
+// JSON — see the design addendum), with permalinks embedded like:
+// https://acme.slack.com/archives/C01EXAMPLE1/p1784833918152799?thread_ts=1784829904.373009&cid=C01EXAMPLE1
+// Real, live-captured format — the thread_ts query param is what reliably
+// identifies the thread (the bare p-digits are the individual message, not
+// necessarily the parent).
+const SLACK_PERMALINK_IN_TEXT_RE = /https:\/\/([\w-]+\.slack\.com)\/archives\/([A-Z0-9]+)\/p\d+\?[^)\s]*thread_ts=([\d.]+)/g;
+
+function extractSlackThreadRefs(searchResultText) {
+  const refs = new Map();
+  for (const match of searchResultText.matchAll(SLACK_PERMALINK_IN_TEXT_RE)) {
+    const [, workspaceDomain, channelId, threadTs] = match;
+    const key = `${channelId}:${threadTs}`;
+    // Capture the workspace domain here — it's the only place it appears, and
+    // without it we can't rebuild a clickable permalink later.
+    if (!refs.has(key)) refs.set(key, { channelId, threadTs, workspaceDomain });
+  }
+  return [...refs.values()];
+}
+
+// --- Claude Desktop (CCD) sessions ---------------------------------------
+// Live-verified shape from mcp__ccd_session_mgmt__list_sessions:
+// { sessionId, title, cwd, isArchived, isRunning, lastActivityAt }
+
+// Sessions the user hasn't touched in a long while aren't "in flight" in any
+// useful sense — this is a short-term workflow surface, not an archive. A
+// cheap deterministic filter here means those never cost an LLM call at all.
+const SESSION_STALE_AFTER_HOURS = 72;
+
+function isCandidateClaudeSession(session, now = new Date()) {
+  if (session.isArchived) return false;
+  if (!session.lastActivityAt) return false;
+  const hoursSince = (now - new Date(session.lastActivityAt)) / (1000 * 60 * 60);
+  return hoursSince <= SESSION_STALE_AFTER_HOURS;
+}
+
+function claudeSessionCandidateToTask(session, judgment) {
+  return {
+    title: session.title,
+    source: 'claude_session',
+    sourceRef: { sessionId: session.sessionId, cwd: session.cwd },
+    summary: judgment?.reason ?? '',
+    waitingOn: judgment?.waitingOn ?? null,
+    ballInUsersCourt: judgment?.waitingOn === 'user',
+  };
+}
+
+function buildSessionJudgmentPrompt(session, transcriptTail) {
+  return [
+    "You are triaging the tail of an AI coding/work session transcript to decide if it's an open loop.",
+    'Respond with STRICT JSON ONLY — no prose, no markdown code fences — matching exactly:',
+    '{"needsAttention": true, "waitingOn": "user|ai|other", "reason": "one short sentence"}',
+    'needsAttention is true only if the work is unfinished AND someone still has to act.',
+    'waitingOn is "user" if the assistant asked a question, requested a decision, or handed a step back to the human;',
+    '"ai" if the assistant was still mid-task; "other" if it is blocked on a third party.',
+    'If the session reads as finished and resolved, needsAttention is false.',
+    `Session title: ${session.title}`,
+    `Transcript tail:\n${transcriptTail}`,
+  ].join('\n');
+}
+
+function parseSessionJudgment(rawText) {
+  try {
+    const parsed = JSON.parse(stripSlackJsonCodeFences(rawText));
+    if (typeof parsed.needsAttention !== 'boolean') return null;
+    const waitingOn = ['user', 'ai', 'other'].includes(parsed.waitingOn) ? parsed.waitingOn : null;
+    return {
+      needsAttention: parsed.needsAttention,
+      waitingOn,
+      reason: typeof parsed.reason === 'string' ? parsed.reason : '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+// --- Watermarks -----------------------------------------------------------
+// The change signal per source: if this string is unchanged since the last
+// scan, nothing about the item has changed, so it must not reach an LLM.
+
+function changeSignalFor(source, item) {
+  if (source === 'claude_session') return `${item.lastActivityAt}`;
+  if (source === 'linear') return `${item.updatedAt}`;
+  if (source === 'slack') return `${item.latestTs ?? item.threadTs}`;
+  if (source === 'todoist') return `${item.dueDate ?? ''}:${item.priority ?? ''}`;
+  return '';
+}
+
+function isUnchangedSinceLastScan(key, signal, watermarks) {
+  return Boolean(signal) && watermarks[key] === signal;
+}
+
+
+// --- storage.js ---
+const STORAGE_KEY = 'task-juggler:tasks:v1';
+const DISMISSED_KEY = 'task-juggler:dismissed:v1';
+const WATERMARKS_KEY = 'task-juggler:watermarks:v1';
+
+function readJson(storageImpl, key, fallback) {
+  const raw = storageImpl.getItem(key);
+  if (!raw) return fallback;
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(fallback)) return Array.isArray(parsed) ? parsed : fallback;
+    return parsed && typeof parsed === 'object' ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function readAll(storageImpl) {
+  return readJson(storageImpl, STORAGE_KEY, []);
+}
+
+function writeAll(storageImpl, tasks) {
+  storageImpl.setItem(STORAGE_KEY, JSON.stringify(tasks));
+}
+
+function loadTasks(storageImpl = globalThis.localStorage) {
+  return readAll(storageImpl);
+}
+
+function saveTasks(tasks, storageImpl = globalThis.localStorage) {
+  writeAll(storageImpl, tasks);
+}
+
+function patchTask(id, patch, storageImpl = globalThis.localStorage) {
+  const tasks = readAll(storageImpl);
+  const idx = tasks.findIndex((t) => t.id === id);
+  if (idx === -1) return null;
+  const updated = { ...tasks[idx], ...patch, updatedAt: new Date().toISOString() };
+  tasks[idx] = updated;
+  writeAll(storageImpl, tasks);
+  return updated;
+}
+
+function addTask(task, storageImpl = globalThis.localStorage) {
+  const tasks = readAll(storageImpl);
+  tasks.push(task);
+  writeAll(storageImpl, tasks);
+  return task;
+}
+
+function deleteTask(id, storageImpl = globalThis.localStorage) {
+  writeAll(storageImpl, readAll(storageImpl).filter((t) => t.id !== id));
+}
+
+// --- Dismissals -----------------------------------------------------------
+// A dismissed key is permanent-until-cleared: discovery must never re-add it,
+// otherwise "delete" is meaningless for auto-detected tasks (they'd reappear
+// on the very next scan).
+
+function loadDismissedKeys(storageImpl = globalThis.localStorage) {
+  return readJson(storageImpl, DISMISSED_KEY, []);
+}
+
+function addDismissedKey(key, storageImpl = globalThis.localStorage) {
+  const keys = loadDismissedKeys(storageImpl);
+  if (!keys.includes(key)) keys.push(key);
+  storageImpl.setItem(DISMISSED_KEY, JSON.stringify(keys));
+  return keys;
+}
+
+function clearDismissedKeys(storageImpl = globalThis.localStorage) {
+  storageImpl.setItem(DISMISSED_KEY, JSON.stringify([]));
+}
+
+// --- Discovery watermarks -------------------------------------------------
+// { sourceRefKey -> last-seen change signal }. If a candidate's current
+// signal matches the stored one, nothing about it has changed since we last
+// looked, so it never needs to reach an LLM again — this is the main guard
+// against burning tokens re-judging identical Slack threads / sessions on
+// every poll.
+
+function loadWatermarks(storageImpl = globalThis.localStorage) {
+  return readJson(storageImpl, WATERMARKS_KEY, {});
+}
+
+function setWatermark(key, signal, storageImpl = globalThis.localStorage) {
+  const marks = loadWatermarks(storageImpl);
+  marks[key] = signal;
+  storageImpl.setItem(WATERMARKS_KEY, JSON.stringify(marks));
+  return marks;
+}
+
+
+// --- aiClient.js ---
+function buildJugglerPrompt(task, canonicalContext) {
+  return [
+    'You are updating the tracked status of a single task based on its latest raw context.',
+    'Respond with STRICT JSON ONLY — no prose, no markdown code fences — matching exactly this shape:',
+    '{"status":"not_started|in_progress|waiting_other|waiting_ai|completed","summary":"string","nextAction":"string","waitingOn":"user|<name>|null","ballInUsersCourt":true,"estRemaining":"small|medium|large","done":false}',
+    `Task title: ${task.title}`,
+    `Raw context:\n${canonicalContext}`,
+  ].join('\n');
+}
+
+const VALID_STATUS = new Set(['not_started', 'in_progress', 'waiting_other', 'waiting_ai', 'completed']);
+const VALID_EST = new Set(['small', 'medium', 'large']);
+
+function stripCodeFences(text) {
+  return text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+}
+
+function parseJugglerResponse(rawText) {
+  try {
+    const parsed = JSON.parse(stripCodeFences(rawText));
+    if (!VALID_STATUS.has(parsed.status)) return null;
+    if (!VALID_EST.has(parsed.estRemaining)) return null;
+    if (typeof parsed.summary !== 'string' || typeof parsed.nextAction !== 'string') return null;
+    return {
+      status: parsed.status,
+      summary: parsed.summary,
+      nextAction: parsed.nextAction,
+      waitingOn: parsed.waitingOn ?? null,
+      ballInUsersCourt: Boolean(parsed.ballInUsersCourt),
+      estRemaining: parsed.estRemaining,
+      done: Boolean(parsed.done),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function refreshTaskViaAi(task, canonicalContext, askClaude) {
+  const raw = await askClaude(buildJugglerPrompt(task, canonicalContext), []);
+  return parseJugglerResponse(raw);
+}
+
+
+// --- mcpAdapters.js ---
+function unwrapMcpResult(result) {
+  if (!result || result.isError) return null;
+  if (result.structuredContent !== undefined) return result.structuredContent;
+  const text = result.content?.[0]?.text;
+  if (typeof text !== 'string') return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function findWorkspacePrefix(linearWorkspaces, workspaceLabel) {
+  const target = workspaceLabel.toLowerCase();
+  const match = Object.entries(linearWorkspaces ?? {}).find(([label]) => label.toLowerCase() === target);
+  return match?.[1];
+}
+
+async function fetchRawContext(task, callMcpTool, toolNames) {
+  if (task.source === 'slack') {
+    const result = await callMcpTool(toolNames.slackReadThread, {
+      channel_id: task.sourceRef.channelId,
+      message_ts: task.sourceRef.threadTs,
+    });
+    return unwrapMcpResult(result);
+  }
+
+  if (task.source === 'linear') {
+    // workspaceLabel may come from a URL slug (lowercase, e.g. "acme") or
+    // from a Linear team name (e.g. "Acme") — match case-insensitively.
+    const prefix = findWorkspacePrefix(toolNames.linearWorkspaces, task.sourceRef.workspaceLabel);
+    if (!prefix) return null;
+    const result = await callMcpTool(`${prefix}get_issue`, { id: task.sourceRef.issueId });
+    return unwrapMcpResult(result);
+  }
+
+  return null;
+}
+
+
+// --- seedMerge.js ---
+
+
+function mergeSeedTasks(existingTasks, seedTasks, dismissedKeys = []) {
+  const blocked = new Set([...existingTasks.map(sourceRefKey), ...dismissedKeys]);
+  const additions = seedTasks.filter((t) => !blocked.has(sourceRefKey(t)));
+  return [...existingTasks, ...additions];
+}
+
+function readSeedFromDocument(doc = globalThis.document) {
+  const el = doc?.getElementById('juggler-seed');
+  if (!el) return [];
+  try {
+    const parsed = JSON.parse(el.textContent);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+
+// --- ui.js ---
+
+
+
+const STATUS_CYCLE = ['not_started', 'in_progress', 'waiting_other', 'waiting_ai', 'completed'];
+const STATUS_LABEL = {
+  not_started: 'Not started',
+  in_progress: 'In progress',
+  waiting_other: 'Waiting (other)',
+  waiting_ai: 'Waiting (AI)',
+  completed: 'Completed',
+};
+
+function nextStatus(status) {
+  const idx = STATUS_CYCLE.indexOf(status);
+  return STATUS_CYCLE[(idx + 1) % STATUS_CYCLE.length];
+}
+
+// A task that came from somewhere real gets a clickable, visually distinct
+// title that jumps back to the source. Tasks with no resolvable source (manual
+// ones, or sources with no verified URL scheme) render as plain text — the
+// underline is a promise that clicking will work.
+function buildTitleEl(task, className) {
+  const link = sourceLinkFor(task);
+  if (!link) {
+    const span = document.createElement('span');
+    span.className = className;
+    span.textContent = task.title;
+    return span;
+  }
+
+  const anchor = document.createElement('a');
+  anchor.className = `${className} jg-title-linked`;
+  anchor.textContent = task.title;
+  anchor.href = link.url;
+  anchor.rel = 'noopener noreferrer';
+  anchor.title = `Open in ${link.kind}: ${link.url}`;
+  anchor.dataset.linkKind = link.kind;
+  // Named target so re-clicking the same task refocuses the tab it opened
+  // before rather than stacking up duplicates.
+  anchor.target = windowNameFor(task);
+  return anchor;
+}
+
+function renderRow(task, handlers, isCompleted) {
+  const row = document.createElement('div');
+  row.className = 'jg-row' + (isCompleted ? ' jg-row-completed' : '');
+  row.dataset.taskId = task.id;
+
+  const chip = document.createElement('button');
+  chip.className = `jg-chip jg-chip-${task.status}`;
+  chip.textContent = STATUS_LABEL[task.status] ?? task.status;
+  chip.addEventListener('click', () => handlers.onCycleStatus(task.id));
+  row.appendChild(chip);
+
+  row.appendChild(buildTitleEl(task, 'jg-title'));
+
+  if (task.summary) {
+    const summary = document.createElement('span');
+    summary.className = 'jg-summary';
+    summary.textContent = task.summary;
+    row.appendChild(summary);
+  }
+
+  if (task.waitingOn) {
+    const badge = document.createElement('span');
+    badge.className = 'jg-badge' + (task.waitingOn === 'user' ? ' jg-badge-user' : '');
+    badge.textContent = `waiting on ${task.waitingOn}`;
+    row.appendChild(badge);
+  }
+
+  if (isCompleted) {
+    const reopen = document.createElement('button');
+    reopen.className = 'jg-reopen';
+    reopen.textContent = 'Reopen';
+    reopen.addEventListener('click', () => handlers.onReopen(task.id));
+    row.appendChild(reopen);
+  } else {
+    const refresh = document.createElement('button');
+    refresh.className = 'jg-refresh';
+    refresh.textContent = '⟳';
+    refresh.addEventListener('click', () => handlers.onRefreshOne(task.id));
+    row.appendChild(refresh);
+
+    const del = document.createElement('button');
+    del.className = 'jg-delete';
+    del.textContent = '✕';
+    del.addEventListener('click', () => handlers.onDelete(task.id));
+    row.appendChild(del);
+  }
+
+  return row;
+}
+
+function renderList(container, tasks, handlers) {
+  container.innerHTML = '';
+  const active = sortTasks(tasks);
+  const done = completedTasks(tasks);
+
+  for (const task of active) container.appendChild(renderRow(task, handlers, false));
+
+  if (done.length) {
+    const header = document.createElement('div');
+    header.className = 'jg-completed-header';
+    header.textContent = `Completed (${done.length})`;
+    container.appendChild(header);
+    for (const task of done) container.appendChild(renderRow(task, handlers, true));
+  }
+}
+
+function renderCard(container, task, handlers) {
+  container.innerHTML = '';
+  if (!task) {
+    container.textContent = 'No tasks.';
+    return;
+  }
+
+  const card = document.createElement('div');
+  card.className = 'jg-card';
+  card.dataset.taskId = task.id;
+
+  const title = document.createElement('h2');
+  title.appendChild(buildTitleEl(task, 'jg-card-title'));
+  card.appendChild(title);
+
+  const summary = document.createElement('p');
+  summary.className = 'jg-card-summary';
+  summary.textContent = task.summary || '(no summary yet)';
+  card.appendChild(summary);
+
+  const next = document.createElement('p');
+  next.className = 'jg-card-next';
+  next.textContent = `Next: ${task.nextAction || '(none)'}`;
+  card.appendChild(next);
+
+  if (task.sourceRef?.url) {
+    const link = document.createElement('a');
+    link.href = task.sourceRef.url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = 'Open source';
+    card.appendChild(link);
+  }
+
+  const skip = document.createElement('button');
+  skip.className = 'jg-skip';
+  skip.textContent = 'Skip →';
+  skip.addEventListener('click', () => handlers.onSkip(task.id));
+  card.appendChild(skip);
+
+  container.appendChild(card);
+}
+
+
+// --- app.js ---
+
+
+
+
+
+
+
+
+
+
+
+const REFRESH_DEBOUNCE_MS = 30_000;
+const CONCURRENCY = 3;
+
+// How many trailing transcript messages to send when judging a session.
+// Deliberately small: the tail is where the open question lives, and this is
+// the single biggest lever on per-scan token cost.
+const SESSION_TAIL_MESSAGES = 6;
+
+// Sources with no automated refresh adapter yet — created via manual add or
+// deep-scan, then user-managed. Not a gap: these are intentionally out of
+// scope for this increment; each gets created via discovery, then the user
+// manages its status directly until a real refresh adapter exists for it.
+const NO_REFRESH_ADAPTER_SOURCES = new Set([
+  'manual', 'url', 'todoist', 'devin', 'claude_code_session', 'claude_session',
+]);
+
+function canonicalize(task, rawContext) {
+  if (task.source === 'slack') return normalizeSlackThread(rawContext);
+  if (task.source === 'linear') return normalizeLinearIssue(rawContext ?? {});
+  return '';
+}
+
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+function blankTask({
+  title, source, sourceRef, ballInUsersCourt, now,
+  sourcePriority = null, dueDate = null, summary = '', waitingOn = null,
+}) {
+  return {
+    id: generateId(), title, source, sourceRef,
+    status: 'not_started', summary, nextAction: '', waitingOn,
+    ballInUsersCourt, estRemaining: 'medium', dueDate,
+    sourcePriority, priorityScore: 0, contextHash: null, lastAiRunAt: null,
+    userPinnedStatus: false, createdAt: now.toISOString(), updatedAt: now.toISOString(),
+  };
+}
+
+function createApp({ storage, callMcpTool, askClaude, toolNames, now = () => new Date() }) {
+  let lastRefreshAt = 0;
+
+  function getTasks() {
+    return loadTasks(storage);
+  }
+
+  async function refreshTask(task) {
+    if (NO_REFRESH_ADAPTER_SOURCES.has(task.source)) {
+      return { task, aiCalled: false };
+    }
+
+    const raw = await fetchRawContext(task, callMcpTool, toolNames);
+    if (raw == null) return { task, aiCalled: false };
+
+    const canonical = canonicalize(task, raw);
+    const newHash = djb2Hash(canonical);
+    if (newHash === task.contextHash) return { task, aiCalled: false };
+
+    const aiResult = await refreshTaskViaAi(task, canonical, askClaude);
+    if (!aiResult) return { task, aiCalled: true, parseFailed: true };
+
+    const patch = {
+      summary: aiResult.summary,
+      nextAction: aiResult.nextAction,
+      waitingOn: aiResult.waitingOn,
+      ballInUsersCourt: aiResult.ballInUsersCourt,
+      estRemaining: aiResult.estRemaining,
+      lastAiRunAt: now().toISOString(),
+      contextHash: newHash,
+    };
+    if (!task.userPinnedStatus) {
+      patch.status = aiResult.done ? 'completed' : aiResult.status;
+    }
+
+    const updated = patchTask(task.id, patch, storage);
+    return { task: updated, aiCalled: true, parseFailed: false };
+  }
+
+  async function refreshAll({ force = false } = {}) {
+    const nowMs = now().getTime();
+    if (!force && nowMs - lastRefreshAt < REFRESH_DEBOUNCE_MS) {
+      return { skipped: true, results: [] };
+    }
+    lastRefreshAt = nowMs;
+    const tasks = getTasks().filter((t) => t.status !== 'completed');
+    const results = await mapWithConcurrency(tasks, CONCURRENCY, refreshTask);
+    return { skipped: false, results };
+  }
+
+  async function refreshOne(id) {
+    const task = getTasks().find((t) => t.id === id);
+    if (!task) return null;
+    return refreshTask(task);
+  }
+
+  async function discoverLinearCandidates() {
+    const candidates = [];
+    for (const [workspaceLabel, prefix] of Object.entries(toolNames.linearWorkspaces ?? {})) {
+      const result = await callMcpTool(`${prefix}list_issues`, { assignee: 'me' });
+      const issues = unwrapMcpResult(result)?.issues ?? [];
+      for (const issue of issues) {
+        if (isUnresolvedLinearIssue(issue)) candidates.push(linearCandidateToTask(issue, workspaceLabel));
+      }
+    }
+    return candidates;
+  }
+
+  async function discoverTodoistCandidates() {
+    if (!toolNames.todoistFindTasks) return [];
+    const result = await callMcpTool(toolNames.todoistFindTasks, { filter: 'today | overdue | p1', limit: 50 });
+    const items = unwrapMcpResult(result)?.tasks ?? [];
+    return items.filter((t) => passesTodoistGate(t, now())).map(todoistCandidateToTask);
+  }
+
+  async function discoverSlackCandidates(blockedKeys, watermarks) {
+    if (!toolNames.slackSearch) return [];
+
+    const searchResult = await callMcpTool(toolNames.slackSearch, { query: 'is:thread (to:me OR from:me)', limit: 10 });
+    const unwrapped = unwrapMcpResult(searchResult);
+    const searchText = typeof unwrapped === 'string' ? unwrapped : (unwrapped?.results ?? '');
+
+    const refs = extractSlackThreadRefs(searchText).filter((ref) => {
+      const key = sourceRefKey({ source: 'slack', sourceRef: ref });
+      if (blockedKeys.has(key)) return false;
+      // The thread's own ts is its change signal here: a thread we've already
+      // judged at this exact ts has nothing new in it, so skip before we ever
+      // fetch or classify it.
+      return !isUnchangedSinceLastScan(key, changeSignalFor('slack', ref), watermarks);
+    });
+
+    const classified = await mapWithConcurrency(refs, CONCURRENCY, async (ref) => {
+      const key = sourceRefKey({ source: 'slack', sourceRef: ref });
+      const threadResult = await callMcpTool(toolNames.slackReadThread, {
+        channel_id: ref.channelId, message_ts: ref.threadTs,
+      });
+      const rawText = unwrapMcpResult(threadResult);
+      if (typeof rawText !== 'string') return null;
+
+      const judgment = parseSlackJudgment(await askClaude(buildSlackJudgmentPrompt(rawText), []));
+      // Record the watermark either way — a "no, this is resolved" verdict is
+      // exactly as expensive as a "yes", and just as wasteful to repeat.
+      setWatermark(key, changeSignalFor('slack', ref), storage);
+      if (!judgment?.needsAttention) return null;
+
+      return {
+        title: judgment.reason || `Slack thread in ${ref.channelId}`,
+        source: 'slack',
+        sourceRef: { channelId: ref.channelId, threadTs: ref.threadTs, workspaceDomain: ref.workspaceDomain },
+      };
+    });
+
+    return classified.filter(Boolean);
+  }
+
+  async function discoverClaudeSessionCandidates(blockedKeys, watermarks) {
+    if (!toolNames.sessionList) return [];
+
+    const result = await callMcpTool(toolNames.sessionList, { limit: 25 });
+    const sessions = unwrapMcpResult(result);
+    const list = Array.isArray(sessions) ? sessions : (sessions?.sessions ?? []);
+
+    const candidates = list.filter((s) => {
+      if (!isCandidateClaudeSession(s, now())) return false;
+      const key = sourceRefKey({ source: 'claude_session', sourceRef: { sessionId: s.sessionId } });
+      if (blockedKeys.has(key)) return false;
+      return !isUnchangedSinceLastScan(key, changeSignalFor('claude_session', s), watermarks);
+    });
+
+    const classified = await mapWithConcurrency(candidates, CONCURRENCY, async (session) => {
+      const key = sourceRefKey({ source: 'claude_session', sourceRef: { sessionId: session.sessionId } });
+      const eventsResult = await callMcpTool(toolNames.sessionEvents, {
+        session_id: session.sessionId, limit: SESSION_TAIL_MESSAGES,
+      });
+      const tail = unwrapMcpResult(eventsResult);
+
+      setWatermark(key, changeSignalFor('claude_session', session), storage);
+      if (typeof tail !== 'string' || !tail.trim()) return null;
+
+      const judgment = parseSessionJudgment(await askClaude(buildSessionJudgmentPrompt(session, tail), []));
+      if (!judgment?.needsAttention) return null;
+      return claudeSessionCandidateToTask(session, judgment);
+    });
+
+    return classified.filter(Boolean);
+  }
+
+  // Known minor gap, not a correctness issue: unlike refreshAll, this has no
+  // debounce of its own, so rapid repeated calls re-run the Linear/Todoist/
+  // Slack-search fetches each time. Harmless in practice — mergeSeedTasks
+  // prevents duplicates, and the existingSlackRefs pre-filter in
+  // discoverSlackCandidates already prevents re-classifying (re-billing AI
+  // for) threads already tracked — but worth fixing if this gets called on
+  // a tighter loop than the current 5-minute auto-refresh interval.
+  async function discoverNewTasks() {
+    const dismissedKeys = loadDismissedKeys(storage);
+    const watermarks = loadWatermarks(storage);
+    // Anything already tracked or explicitly dismissed is blocked from even
+    // being fetched again, let alone re-judged by an LLM.
+    const blockedKeys = new Set([...getTasks().map(sourceRefKey), ...dismissedKeys]);
+
+    const [linearCandidates, todoistCandidates, slackCandidates, sessionCandidates] = await Promise.all([
+      discoverLinearCandidates(),
+      discoverTodoistCandidates(),
+      discoverSlackCandidates(blockedKeys, watermarks),
+      discoverClaudeSessionCandidates(blockedKeys, watermarks),
+    ]);
+
+    const candidateTasks = [
+      ...linearCandidates, ...todoistCandidates, ...slackCandidates, ...sessionCandidates,
+    ].map((c) => blankTask({
+      title: c.title, source: c.source, sourceRef: c.sourceRef,
+      ballInUsersCourt: c.ballInUsersCourt ?? false, now: now(),
+      sourcePriority: c.sourcePriority ?? null, dueDate: c.dueDate ?? null,
+      summary: c.summary ?? '', waitingOn: c.waitingOn ?? null,
+    }));
+
+    const existing = getTasks();
+    const merged = mergeSeedTasks(existing, candidateTasks, dismissedKeys);
+    saveTasks(merged, storage);
+    return { added: merged.length - existing.length };
+  }
+
+  function addManualTask(title) {
+    return addTask(blankTask({ title, source: 'manual', sourceRef: {}, ballInUsersCourt: true, now: now() }), storage);
+  }
+
+  function addByLink(url) {
+    const parsed = parseLink(url);
+    return addTask(blankTask({
+      title: url, source: parsed.source, sourceRef: parsed.sourceRef,
+      ballInUsersCourt: false, now: now(),
+    }), storage);
+  }
+
+  function cycleStatusManual(id, nextStatusFn) {
+    const task = getTasks().find((t) => t.id === id);
+    if (!task) return null;
+    return patchTask(id, { status: nextStatusFn(task.status), userPinnedStatus: true }, storage);
+  }
+
+  function reopen(id) {
+    return patchTask(id, { status: 'not_started', userPinnedStatus: true }, storage);
+  }
+
+  // "Remove" is a dismissal, not just a delete: the task's identity goes on
+  // the dismissed list so discovery can never resurface it. Without this,
+  // deleting an auto-detected task is meaningless — the next scan just adds
+  // it straight back.
+  function remove(id) {
+    const task = getTasks().find((t) => t.id === id);
+    if (task) addDismissedKey(sourceRefKey(task), storage);
+    deleteTask(id, storage);
+  }
+
+  function undismissAll() {
+    clearDismissedKeys(storage);
+  }
+
+  return {
+    getTasks, refreshAll, refreshOne, discoverNewTasks,
+    addManualTask, addByLink, cycleStatusManual, reopen, remove, undismissAll,
+  };
+}
+
+
+// --- main.js ---
+
+
+
+
+
+
+const DEFAULT_TOOL_NAMES = {
+  slackReadThread: '',
+  slackSearch: '',
+  linearWorkspaces: {},
+  todoistFindTasks: '',
+  sessionList: '',
+  sessionEvents: '',
+};
+
+// While the artifact is open and visible, check for updates and new
+// candidates automatically — no scheduled task or background service
+// required, since this is just a normal setInterval inside the artifact's
+// own JS, using the same MCP access it already has.
+const AUTO_REFRESH_MS = 5 * 60 * 1000;
+
+function mountApp(doc, app, options = {}) {
+  // Auto-refresh is opt-in (null by default) so existing/new tests never spin
+  // up a real interval unintentionally — the real boot() below turns it on
+  // with a sensible interval. Visibility-checked so it doesn't do work while
+  // the artifact tab/panel isn't actually open.
+  const { autoRefreshMs = null, offline = false } = options;
+  let viewMode = 'list';
+  let cardQueue = [];
+  let cardIndex = 0;
+
+  function activeIds(tasks) {
+    // Card view exists to surface the single best next thing to do, so its
+    // initial queue order must match the same priority tiering as list view
+    // (not raw insertion order).
+    return sortTasks(tasks).map((t) => t.id);
+  }
+
+  function render() {
+    const tasks = app.getTasks();
+    const listEl = doc.getElementById('jg-list');
+    const cardEl = doc.getElementById('jg-card');
+
+    if (viewMode === 'list') {
+      listEl.hidden = false;
+      cardEl.hidden = true;
+      renderList(listEl, tasks, handlers);
+    } else {
+      listEl.hidden = true;
+      cardEl.hidden = false;
+      if (!cardQueue.length) cardQueue = activeIds(tasks);
+      const id = cardQueue.length ? cardQueue[cardIndex % cardQueue.length] : null;
+      renderCard(cardEl, tasks.find((t) => t.id === id) ?? null, handlers);
+    }
+  }
+
+  const handlers = {
+    onCycleStatus(id) { app.cycleStatusManual(id, nextStatus); render(); },
+    onDelete(id) { app.remove(id); render(); },
+    onReopen(id) { app.reopen(id); render(); },
+    async onRefreshOne(id) { await app.refreshOne(id); render(); },
+    onSkip(id) {
+      const pos = cardQueue.indexOf(id);
+      if (pos !== -1) cardQueue.push(cardQueue.splice(pos, 1)[0]);
+      cardIndex = cardQueue.length ? cardIndex % cardQueue.length : 0;
+      render();
+    },
+  };
+
+  doc.getElementById('jg-add-btn').addEventListener('click', () => {
+    const input = doc.getElementById('jg-add-input');
+    const value = input.value.trim();
+    if (!value) return;
+    if (/^https?:\/\//.test(value)) app.addByLink(value);
+    else app.addManualTask(value);
+    input.value = '';
+    render();
+  });
+
+  async function runRefreshAndDiscover(statusPrefix) {
+    const statusEl = doc.getElementById('jg-status');
+    if (offline) {
+      statusEl.textContent = 'Local mode — no connectors available, discovery is off';
+      return;
+    }
+    statusEl.textContent = `${statusPrefix}…`;
+    try {
+      const [refreshResult, discoverResult] = await Promise.all([app.refreshAll(), app.discoverNewTasks()]);
+      const aiCalls = refreshResult.results.filter((r) => r.aiCalled).length;
+      const addedNote = discoverResult.added ? `, ${discoverResult.added} new` : '';
+      statusEl.textContent = refreshResult.skipped
+        ? 'Just refreshed'
+        : `${statusPrefix}ed (${aiCalls} AI call${aiCalls === 1 ? '' : 's'}${addedNote})`;
+    } catch (err) {
+      // A failing connector must never take the list down with it.
+      statusEl.textContent = `Refresh failed: ${err?.message ?? 'unknown error'}`;
+    }
+    render();
+  }
+
+  doc.getElementById('jg-refresh-btn').addEventListener('click', () => runRefreshAndDiscover('Refresh'));
+
+  doc.getElementById('jg-view-toggle').addEventListener('click', () => {
+    viewMode = viewMode === 'list' ? 'card' : 'list';
+    cardQueue = [];
+    cardIndex = 0;
+    render();
+  });
+
+  if (autoRefreshMs) {
+    setInterval(() => {
+      if (doc.visibilityState && doc.visibilityState !== 'visible') return;
+      runRefreshAndDiscover('Auto-refresh');
+    }, autoRefreshMs);
+  }
+
+  render();
+  return { render, handlers };
+}
+
+// The artifact may be opened somewhere with no MCP bridge at all (a plain
+// browser, a preview, a host that exposes a different runtime). Previously
+// that threw on `window.cowork.callMcpTool` and killed the whole page. It
+// should instead run as a perfectly good local task list: manual add, edit,
+// status, dismissal and persistence all work without any bridge — only
+// discovery and refresh need one.
+function resolveBridge(win) {
+  if (win.cowork?.callMcpTool && win.cowork?.askClaude) {
+    return { callMcpTool: win.cowork.callMcpTool, askClaude: win.cowork.askClaude, connected: true };
+  }
+  const unavailable = async () => {
+    throw new Error('No MCP bridge available in this environment');
+  };
+  return { callMcpTool: unavailable, askClaude: unavailable, connected: false };
+}
+
+function boot() {
+  const seeds = readSeedFromDocument(document);
+  if (seeds.length) {
+    saveTasks(mergeSeedTasks(loadTasks(window.localStorage), seeds), window.localStorage);
+  }
+  const bridge = resolveBridge(window);
+  const app = createApp({
+    storage: window.localStorage,
+    callMcpTool: bridge.callMcpTool,
+    askClaude: bridge.askClaude,
+    toolNames: window.__JUGGLER_TOOL_NAMES__ ?? DEFAULT_TOOL_NAMES,
+  });
+  mountApp(document, app, {
+    autoRefreshMs: bridge.connected ? AUTO_REFRESH_MS : null,
+    offline: !bridge.connected,
+  });
+}
+
+if (typeof window !== 'undefined' && !window.__JUGGLER_TEST__) {
+  // The script may execute before OR after DOMContentLoaded has already fired
+  // (e.g. a host environment that injects this script into an already-parsed
+  // document), so check readyState instead of unconditionally waiting for an
+  // event that might never come.
+  if (document.readyState === 'loading') {
+    window.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
+}
+
+</script>
+</body>
+</html>

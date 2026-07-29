@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8" /><title>Task Juggler — Mock Harness</title></head>
+<body>
+<p style="font: 12px monospace; opacity: 0.6;">
+  Mock harness: window.cowork is a fake seeded with real captured fixture shapes.
+  Open dev tools console to see callMcpTool/askClaude call logs.
+</p>
+<script type="module">
+  import {
+    MOCK_TOOL_NAMES, MOCK_SLACK_THREAD_V1, MOCK_LINEAR_ISSUE,
+    MOCK_LINEAR_DISCOVERY_ISSUE, MOCK_TODOIST_DISCOVERY_ITEM, MOCK_SLACK_DISCOVERY_THREAD,
+    MOCK_CCD_SESSION, MOCK_CCD_SESSION_TAIL,
+  } from './mock-fixtures.js';
+
+  const state = { slackVersion: 1 };
+  window.__JUGGLER_TOOL_NAMES__ = MOCK_TOOL_NAMES;
+
+  window.cowork = {
+    async callMcpTool(name, args) {
+      console.log('[mock callMcpTool]', name, args);
+      if (name === MOCK_TOOL_NAMES.slackReadThread) {
+        if (args.channel_id === MOCK_SLACK_DISCOVERY_THREAD.channelId) {
+          return { content: [{ text: MOCK_SLACK_DISCOVERY_THREAD.rawText }], isError: false };
+        }
+        const text = state.slackVersion === 1
+          ? MOCK_SLACK_THREAD_V1.rawText
+          : MOCK_SLACK_THREAD_V1.rawText + '\nNEW REPLY';
+        return { content: [{ text }], isError: false };
+      }
+      if (name === `${MOCK_TOOL_NAMES.linearWorkspaces.Acme}get_issue`) {
+        return { structuredContent: MOCK_LINEAR_ISSUE, isError: false };
+      }
+      if (name === `${MOCK_TOOL_NAMES.linearWorkspaces.Acme}list_issues`) {
+        return { structuredContent: { issues: [MOCK_LINEAR_DISCOVERY_ISSUE] }, isError: false };
+      }
+      if (name === `${MOCK_TOOL_NAMES.linearWorkspaces.Globex}list_issues`) {
+        return { structuredContent: { issues: [] }, isError: false };
+      }
+      if (name === MOCK_TOOL_NAMES.todoistFindTasks) {
+        return { structuredContent: { tasks: [MOCK_TODOIST_DISCOVERY_ITEM] }, isError: false };
+      }
+      if (name === MOCK_TOOL_NAMES.slackSearch) {
+        return { content: [{ text: MOCK_SLACK_DISCOVERY_THREAD.searchSnippet }], isError: false };
+      }
+      if (name === MOCK_TOOL_NAMES.sessionList) {
+        return { structuredContent: [MOCK_CCD_SESSION], isError: false };
+      }
+      if (name === MOCK_TOOL_NAMES.sessionEvents) {
+        return { content: [{ text: MOCK_CCD_SESSION_TAIL }], isError: false };
+      }
+      return { content: [{ text: '{}' }], isError: true };
+    },
+    async askClaude(prompt) {
+      console.log('[mock askClaude]', prompt.slice(0, 120) + '…');
+      if (prompt.includes('triaging a Slack thread')) {
+        return JSON.stringify({ needsAttention: true, reason: 'Priya asked Dana to review pricing copy' });
+      }
+      if (prompt.includes('triaging the tail of an AI')) {
+        return JSON.stringify({
+          needsAttention: true, waitingOn: 'user',
+          reason: 'Needs you to submit the W-9 tax form',
+        });
+      }
+      if (prompt.includes('Want me to add this release')) {
+        return JSON.stringify({
+          status: 'waiting_other', summary: 'Devin asked whether to add the release to the changelog.',
+          nextAction: 'Reply yes/no on the changelog question', waitingOn: 'user',
+          ballInUsersCourt: true, estRemaining: 'small', done: false,
+        });
+      }
+      return JSON.stringify({
+        status: 'in_progress', summary: 'Issue is in triage, needs a resolution decision.',
+        nextAction: 'Decide backfill approach for the 9 affected plans', waitingOn: 'user',
+        ballInUsersCourt: true, estRemaining: 'medium', done: false,
+      });
+    },
+  };
+
+  // Helper for the Browser tool (via javascript_tool, for test setup only) to
+  // flip the Slack fixture to its "changed" version, to exercise the cache-miss
+  // path live.
+  window.__jugglerFlipSlackFixture = () => { state.slackVersion = 2; };
+
+  window.__jugglerErrors = [];
+  window.addEventListener('error', (e) => {
+    window.__jugglerErrors.push(String(e.error?.stack || e.message));
+    console.error('[harness caught error]', e.error?.stack || e.message);
+  });
+
+  const res = await fetch('../dist/task-juggler.html');
+  const html = await res.text();
+  const styleMatch = html.match(/<style>([\s\S]*?)<\/style>/);
+  const style = document.createElement('style');
+  style.textContent = styleMatch[1];
+  document.head.appendChild(style);
+  const bodyMatch = html.match(/<body>([\s\S]*)<\/body>/);
+  document.body.innerHTML = bodyMatch[1];
+  const scriptMatch = html.match(/<script type="module">([\s\S]*?)<\/script>\s*<\/body>/);
+  const script = document.createElement('script');
+  script.type = 'module';
+  script.textContent = scriptMatch[1];
+  document.body.appendChild(script);
+</script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "id": "GLBX-47",
+  "title": "[EPIC 4] GitHub Projects Migration & Contribution Pipeline",
+  "status": "Backlog",
+  "statusType": "backlog",
+  "assignee": "Kafe",
+  "priority": { "value": 2, "name": "High" },
+  "dueDate": null,
+  "labels": ["Epic", "GitHub Migration"],
+  "url": "https://linear.app/globex/issue/GLBX-47/epic-4-github-projects-migration-and-contribution-pipeline",
+  "team": "Globex",
+  "updatedAt": "2026-07-16T17:59:43.681Z"
+}

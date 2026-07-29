@@ -1,0 +1,8 @@
+{
+  "name": "task-juggler",
+  "description": "Personal workflow juggler: tracks in-flight Slack threads, Linear tickets, Todoist items, and Claude sessions, and surfaces the single best next thing to do.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Kafe"
+  }
+}

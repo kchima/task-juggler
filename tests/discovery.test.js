@@ -1,0 +1,170 @@
+import { describe, it, expect } from 'vitest';
+import {
+  passesTodoistGate,
+  todoistCandidateToTask,
+  isUnresolvedLinearIssue,
+  linearCandidateToTask,
+  buildSlackJudgmentPrompt,
+  parseSlackJudgment,
+  slackCandidateToTask,
+  extractSlackThreadRefs,
+} from '../src/discovery.js';
+import acmeIssue from './fixtures/linear-acme-issue.json' with { type: 'json' };
+
+const NOW = new Date('2026-07-25T12:00:00Z');
+
+describe('passesTodoistGate — real captured Todoist items', () => {
+  it('excludes a p2 chore due months out ("Cancel the unused subscription", real item)', () => {
+    expect(passesTodoistGate({ priority: 'p2', dueDate: '2026-10-15' }, NOW)).toBe(false);
+  });
+
+  it('excludes a p4 chore with a due date today isn\'t enough to override... actually due-today DOES pass regardless of priority', () => {
+    // "Water the plants" is real: p4, recurring, due 2026-07-06 (in the past relative to NOW)
+    expect(passesTodoistGate({ priority: 'p4', dueDate: '2026-07-06' }, NOW)).toBe(true);
+  });
+
+  it('includes a p1 item with no due date at all ("Renew the annual service plan" is p1, real item)', () => {
+    expect(passesTodoistGate({ priority: 'p1', dueDate: null }, NOW)).toBe(true);
+  });
+
+  it('excludes a p2 item with a due date in the future ("Quarterly access review", real item, due 2026-07-27)', () => {
+    expect(passesTodoistGate({ priority: 'p2', dueDate: '2026-07-27' }, NOW)).toBe(false);
+  });
+
+  it('includes an item with no priority field but an overdue due date', () => {
+    expect(passesTodoistGate({ priority: null, dueDate: '2020-01-01' }, NOW)).toBe(true);
+  });
+
+  it('excludes an item with neither a due date nor p1', () => {
+    expect(passesTodoistGate({ priority: 'p3', dueDate: null }, NOW)).toBe(false);
+  });
+});
+
+describe('todoistCandidateToTask', () => {
+  it('shapes a real Todoist item into a candidate task', () => {
+    const real = {
+      id: 'TD00000000000001',
+      content: 'Renew the annual service plan before it lapses',
+      priority: 'p1',
+      dueDate: '2027-06-01',
+      projectId: 'PJ00000000000001',
+    };
+    const task = todoistCandidateToTask(real);
+    expect(task.source).toBe('todoist');
+    expect(task.title).toBe(real.content);
+    expect(task.sourceRef).toEqual({ taskId: 'TD00000000000001', projectId: 'PJ00000000000001' });
+    expect(task.sourcePriority).toBe('urgent');
+    expect(task.dueDate).toBe('2027-06-01');
+  });
+
+  it('leaves sourcePriority null for a non-p1 item', () => {
+    const task = todoistCandidateToTask({ id: 'x', content: 'x', priority: 'p2', dueDate: null, projectId: 'p' });
+    expect(task.sourcePriority).toBeNull();
+  });
+});
+
+describe('isUnresolvedLinearIssue — real captured statusTypes', () => {
+  it('treats "triage" as unresolved (real: ACME-3913)', () => {
+    expect(isUnresolvedLinearIssue({ statusType: 'triage' })).toBe(true);
+  });
+
+  it('treats "backlog" as unresolved (real: GLBX-47)', () => {
+    expect(isUnresolvedLinearIssue({ statusType: 'backlog' })).toBe(true);
+  });
+
+  it('treats "started" as unresolved', () => {
+    expect(isUnresolvedLinearIssue({ statusType: 'started' })).toBe(true);
+  });
+
+  it('treats "completed" as resolved (real: ACME-3903)', () => {
+    expect(isUnresolvedLinearIssue({ statusType: 'completed' })).toBe(false);
+  });
+
+  it('treats "canceled" as resolved', () => {
+    expect(isUnresolvedLinearIssue({ statusType: 'canceled' })).toBe(false);
+  });
+});
+
+describe('linearCandidateToTask', () => {
+  it('shapes a real captured Linear issue into a candidate task', () => {
+    const task = linearCandidateToTask(acmeIssue, 'acme');
+    expect(task.source).toBe('linear');
+    expect(task.title).toBe(acmeIssue.title);
+    expect(task.sourceRef).toEqual({ workspaceLabel: 'acme', issueId: 'ACME-3913', url: acmeIssue.url });
+    expect(task.sourcePriority).toBe('no priority');
+  });
+});
+
+describe('Slack judgment classification', () => {
+  it('buildSlackJudgmentPrompt embeds the raw thread text and demands strict JSON', () => {
+    const prompt = buildSlackJudgmentPrompt('some real thread text');
+    expect(prompt).toContain('some real thread text');
+    expect(prompt.toLowerCase()).toContain('json');
+  });
+
+  it('parseSlackJudgment parses a clean response', () => {
+    const parsed = parseSlackJudgment(JSON.stringify({ needsAttention: true, reason: 'Devin asked a question' }));
+    expect(parsed).toEqual({ needsAttention: true, reason: 'Devin asked a question' });
+  });
+
+  it('parseSlackJudgment strips a code fence', () => {
+    const fenced = '```json\n' + JSON.stringify({ needsAttention: false, reason: 'resolved' }) + '\n```';
+    expect(parseSlackJudgment(fenced)).toEqual({ needsAttention: false, reason: 'resolved' });
+  });
+
+  it('parseSlackJudgment returns null for malformed JSON', () => {
+    expect(parseSlackJudgment('not json')).toBeNull();
+  });
+
+  it('parseSlackJudgment returns null when needsAttention is missing or not boolean', () => {
+    expect(parseSlackJudgment(JSON.stringify({ reason: 'x' }))).toBeNull();
+    expect(parseSlackJudgment(JSON.stringify({ needsAttention: 'yes', reason: 'x' }))).toBeNull();
+  });
+
+  it('slackCandidateToTask shapes a real captured thread into a candidate task', () => {
+    const task = slackCandidateToTask({
+      channelId: 'C01EXAMPLE1',
+      threadTs: '1784829904.373009',
+      title: 'Devin asked whether to add the release to the changelog',
+    });
+    expect(task.source).toBe('slack');
+    expect(task.sourceRef).toEqual({ channelId: 'C01EXAMPLE1', threadTs: '1784829904.373009' });
+  });
+});
+
+describe('extractSlackThreadRefs — real captured Slack search result text', () => {
+  const REAL_SEARCH_TEXT = [
+    '# Search Results for: is:thread after:2026-06-01',
+    '## Messages (5 results)',
+    '### Result 1 of 5',
+    'Channel: #engineering (ID: C01EXAMPLE1)',
+    'From: Priya Nair <priya@acme.example> (ID: U02EXAMPLE2)',
+    'Message_ts: 1784833918.152799',
+    'Permalink: [link](https://acme.slack.com/archives/C01EXAMPLE1/p1784833918152799?thread_ts=1784829904.373009&cid=C01EXAMPLE1)',
+    'Text: aside Dana I think we will need to do a frontend deploy as well',
+    '### Result 3 of 5',
+    'Channel: #engineering (ID: C01EXAMPLE1)',
+    'From: Devin (ID: U03EXAMPLE3)  [BOT]',
+    'Permalink: [link](https://acme.slack.com/archives/C01EXAMPLE1/p1784833812477119?thread_ts=1784829904.373009&cid=C01EXAMPLE1)',
+  ].join('\n');
+
+  it('extracts the parent thread_ts from real permalinks, not the individual message p-digits', () => {
+    const refs = extractSlackThreadRefs(REAL_SEARCH_TEXT);
+    expect(refs).toContainEqual({
+      channelId: 'C01EXAMPLE1',
+      threadTs: '1784829904.373009',
+      // Captured so a clickable permalink can be rebuilt later — it appears
+      // nowhere else in the response.
+      workspaceDomain: 'acme.slack.com',
+    });
+  });
+
+  it('dedups multiple messages from the same real thread into one ref', () => {
+    const refs = extractSlackThreadRefs(REAL_SEARCH_TEXT);
+    expect(refs).toHaveLength(1);
+  });
+
+  it('returns an empty array for text with no permalinks', () => {
+    expect(extractSlackThreadRefs('no links here')).toEqual([]);
+  });
+});

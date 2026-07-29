@@ -1,0 +1,13 @@
+{
+  "id": "ACME-3913",
+  "title": "Invalid upsell configs silently disable the plan Save button — decide resolution + backfill",
+  "status": "Triage",
+  "statusType": "triage",
+  "assignee": "dev@acme.example",
+  "priority": { "value": 0, "name": "No priority" },
+  "dueDate": null,
+  "labels": ["Backend", "frontend", "Bug"],
+  "url": "https://linear.app/acme/issue/ACME-3913/invalid-upsell-configs-silently-disable-the-plan-save-button",
+  "team": "AcmeEngineering",
+  "updatedAt": "2026-07-23T17:41:17.045Z"
+}
