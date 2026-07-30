@@ -367,11 +367,16 @@ describe('createApp.runSlackTriage', () => {
     const { djb2Hash } = await import('../src/hash.js');
     const { normalizeSlackThread } = await import('../src/normalize.js');
     const matchingHash = djb2Hash(normalizeSlackThread(slackThread.rawText));
+    // Slack's stored signal is versioned ("v1:<hash>", see SLACK_JUDGMENT_VERSION
+    // in app.js) so a future prompt/criteria change can invalidate every past
+    // verdict at once — content-unchanged and verdict-still-valid aren't the
+    // same claim. A bare hash here would (correctly) look stale and re-trigger
+    // classification, which is exactly what this test is checking does NOT happen.
     storage.setItem('task-juggler:tasks:v1', JSON.stringify([
       linearTask({
         id: 'unchanged-slack', source: 'slack',
         sourceRef: { channelId: 'C01EXAMPLE1', threadTs: '1784829904.373009' },
-        contextHash: matchingHash,
+        contextHash: `v1:${matchingHash}`,
       }),
     ]));
     const callMcpTool = mockCallMcpTool();
@@ -388,6 +393,62 @@ describe('createApp.runSlackTriage', () => {
     const askClaude = vi.fn().mockResolvedValue(JSON.stringify(RESOLVED_VERDICT));
     const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
     await app.runSlackTriage({ force: true });
+    askClaude.mockClear();
+    const second = await app.runSlackTriage({ force: true });
+    expect(askClaude).not.toHaveBeenCalled();
+    expect(second.aiCalled).toBe(false);
+  });
+
+  // The actual bug this locks in: "content unchanged" and "verdict still
+  // valid" are different claims. A watermark written under an old judgment
+  // version must not be trusted just because the thread's content happens
+  // to be identical — otherwise a thread that was ever misjudged (or judged
+  // under stale criteria) becomes permanently invisible, even after the
+  // classification logic improves.
+  it('a watermark written under a stale judgment version is treated as changed, not unchanged, even though the content is identical', async () => {
+    const callMcpTool = mockCallMcpTool();
+    const askClaude = vi.fn().mockResolvedValue(JSON.stringify(RESOLVED_VERDICT));
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
+    await app.runSlackTriage({ force: true }); // writes a "v1:<hash>" watermark
+
+    // Simulate a judgment-version bump by corrupting the stored watermark to
+    // look like it came from a different (older) version, same content hash.
+    const marks = JSON.parse(storage.getItem('task-juggler:watermarks:v1'));
+    const key = Object.keys(marks).find((k) => k.startsWith('slack:'));
+    marks[key] = marks[key].replace(/^v\d+:/, 'v0:');
+    storage.setItem('task-juggler:watermarks:v1', JSON.stringify(marks));
+
+    askClaude.mockClear();
+    const second = await app.runSlackTriage({ force: true });
+    expect(askClaude).toHaveBeenCalledTimes(1); // re-classified despite unchanged content
+    expect(second.aiCalled).toBe(true);
+  });
+
+  it('an already-tracked thread patched under a stale judgment version is re-classified, not skipped as unchanged', async () => {
+    storage.setItem('task-juggler:tasks:v1', JSON.stringify([
+      linearTask({
+        id: 'stale-version-slack', source: 'slack',
+        sourceRef: { channelId: 'C01EXAMPLE1', threadTs: '1784829904.373009' },
+        contextHash: 'v0:some-old-hash-format', // wrong version prefix, regardless of hash value
+      }),
+    ]));
+    const callMcpTool = mockCallMcpTool();
+    const askClaude = vi.fn().mockResolvedValue(JSON.stringify(ONGOING_VERDICT));
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
+    const result = await app.runSlackTriage({ force: true });
+    expect(askClaude).toHaveBeenCalledTimes(1);
+    expect(result.updated).toBe(1);
+  });
+
+  it('a newly-added Slack task is stored with a real contextHash, not null, so the very next scan does not needlessly re-classify it', async () => {
+    const callMcpTool = mockCallMcpTool();
+    const askClaude = vi.fn().mockResolvedValue(JSON.stringify(ONGOING_VERDICT));
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
+    await app.runSlackTriage({ force: true });
+
+    const added = app.getTasks().find((t) => t.source === 'slack');
+    expect(added.contextHash).not.toBeNull();
+
     askClaude.mockClear();
     const second = await app.runSlackTriage({ force: true });
     expect(askClaude).not.toHaveBeenCalled();

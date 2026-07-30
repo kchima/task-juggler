@@ -22,6 +22,22 @@ import {
 const REFRESH_DEBOUNCE_MS = 30_000;
 const CONCURRENCY = 3;
 
+// "Content unchanged since last look" and "judgment still valid" are NOT the
+// same claim, and treating them as one is a real bug: a thread's watermark
+// is written on ANY verdict (including a wrong one, or one that's since
+// become outdated by a prompt/criteria change), and content-hash comparison
+// alone can never tell the difference between "still correct" and "content
+// happens to be identical to what got a stale verdict." Bump this whenever
+// buildSlackBatchPrompt's classification criteria changes in a way that
+// could change past verdicts — it invalidates every existing Slack
+// watermark and tracked contextHash at once, forcing one fresh look at
+// everything (tracked or not) on the next scan, regardless of whether the
+// thread's content itself changed.
+const SLACK_JUDGMENT_VERSION = 'v1';
+function slackChangeSignal(hash) {
+  return `${SLACK_JUDGMENT_VERSION}:${hash}`;
+}
+
 // How many trailing transcript messages to send when judging a session.
 // Deliberately small: the tail is where the open question lives, and this is
 // the single biggest lever on per-scan token cost.
@@ -69,13 +85,13 @@ function threadLabel(rawText, ref) {
 
 function blankTask({
   title, source, sourceRef, ballInUsersCourt, now,
-  sourcePriority = null, dueDate = null, summary = '', waitingOn = null,
+  sourcePriority = null, dueDate = null, summary = '', waitingOn = null, contextHash = null,
 }) {
   return {
     id: generateId(), title, source, sourceRef,
     status: 'not_started', summary, nextAction: '', waitingOn,
     ballInUsersCourt, estRemaining: 'medium', dueDate,
-    sourcePriority, priorityScore: 0, contextHash: null, lastAiRunAt: null,
+    sourcePriority, priorityScore: 0, contextHash, lastAiRunAt: null,
     userPinnedStatus: false, createdAt: now.toISOString(), updatedAt: now.toISOString(),
   };
 }
@@ -242,8 +258,8 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
         continue;
       }
       const tracked = trackedByKey.get(key);
-      const priorHash = tracked ? tracked.contextHash : watermarks[key];
-      if (priorHash === entry.hash) {
+      const priorSignal = tracked ? tracked.contextHash : watermarks[key];
+      if (priorSignal === slackChangeSignal(entry.hash)) {
         detected.set(key, { key, label, outcome: 'unchanged' });
       } else {
         toClassify.push(entry);
@@ -269,6 +285,7 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
       const prior = detected.get(entry.key);
       if (!verdict) { unparsed++; detected.set(entry.key, { ...prior, outcome: 'unparsed' }); continue; }
 
+      const signal = slackChangeSignal(entry.hash);
       const tracked = trackedByKey.get(entry.key);
       if (tracked) {
         const patch = {
@@ -276,7 +293,7 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
           waitingOn: verdict.waitingOn,
           ballInUsersCourt: verdict.ballInUsersCourt,
           lastAiRunAt: now().toISOString(),
-          contextHash: entry.hash,
+          contextHash: signal,
         };
         if (!tracked.userPinnedStatus) patch.status = verdict.status;
         patchTask(tracked.id, patch, storage);
@@ -292,6 +309,7 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
           now: now(),
           summary: verdict.summary,
           waitingOn: verdict.waitingOn,
+          contextHash: signal, // avoids a pointless re-classification of a brand-new, unchanged task on the very next scan
         }));
         added++;
         ongoing++;
@@ -305,7 +323,11 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
       // went, so a resolved-and-skipped thread isn't re-fetched and
       // re-classified forever. Unparsed threads are deliberately excluded
       // (see the `unparsed` branch above) so they get retried, not stuck.
-      setWatermark(entry.key, entry.hash, storage);
+      // The signal is versioned (see SLACK_JUDGMENT_VERSION) — bumping that
+      // constant invalidates this watermark even though the content itself
+      // hasn't changed, which is exactly the point: "content unchanged" and
+      // "verdict still valid" are different claims.
+      setWatermark(entry.key, signal, storage);
     }
 
     return { scanned, ongoing, updated, added, skippedResolved, unparsed, aiCalled: true, newTasks, detected: [...detected.values()] };
