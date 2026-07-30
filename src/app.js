@@ -2,7 +2,7 @@ import {
   loadTasks, saveTasks, patchTask, addTask, deleteTask,
   loadDismissedKeys, addDismissedKey, clearDismissedKeys, loadWatermarks, setWatermark,
 } from './storage.js';
-import { fetchRawContext, unwrapMcpResult } from './mcpAdapters.js';
+import { fetchRawContext, unwrapMcpResult, slackThreadText } from './mcpAdapters.js';
 import { normalizeLinearIssue, normalizeSlackThread } from './normalize.js';
 import { djb2Hash } from './hash.js';
 import { refreshTaskViaAi } from './aiClient.js';
@@ -234,7 +234,7 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
         const threadResult = await callMcpTool(toolNames.slackReadThread, {
           channel_id: ref.channelId, message_ts: ref.threadTs,
         });
-        const rawText = unwrapMcpResult(threadResult);
+        const rawText = slackThreadText(unwrapMcpResult(threadResult));
         if (typeof rawText !== 'string') return null;
         return { key, ref, rawText, hash: djb2Hash(normalizeSlackThread(rawText)) };
       } catch {
@@ -356,6 +356,13 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
 
     const refsByKey = new Map();
     const errors = [];
+    const configNotes = [];
+    if (!toolNames.slackSearch) {
+      // Tracked threads still get refreshed below; only *discovery* of new
+      // ones is off. Worth saying out loud rather than looking like "nothing
+      // is happening in Slack."
+      configNotes.push({ key: 'slack:not-configured', label: 'no search tool configured (slackSearch is unset) — only already-tracked threads are refreshed', outcome: 'not-configured' });
+    }
     if (toolNames.slackSearch) {
       for (const query of buildSlackRecentQueries(now())) {
         try {
@@ -383,14 +390,14 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
     }
     for (const key of dismissedKeys) refsByKey.delete(key);
 
-    const { newTasks, ...summary } = await slackTriageForRefs(refsByKey, trackedByKey);
+    const { newTasks, detected, ...summary } = await slackTriageForRefs(refsByKey, trackedByKey);
 
     if (newTasks.length) {
       const existing = getTasks();
       saveTasks(mergeSeedTasks(existing, newTasks, [...dismissedKeys]), storage);
     }
 
-    return { skipped: false, ...summary, unreadCheckAvailable: false, errors };
+    return { skipped: false, ...summary, detected: [...configNotes, ...detected], unreadCheckAvailable: false, errors };
   }
 
   // Coded against the live-verified ccd_session_mgmt shape only:
@@ -403,7 +410,15 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
   // as "no in-flight sessions." Wiring up session_info itself needs a fresh
   // probe from within Cowork first — see the plugin skill notes.
   async function discoverClaudeSessionCandidates(blockedKeys, watermarks) {
-    if (!toolNames.sessionList) return { candidates: [], error: null, detected: [] };
+    // An unset tool name is the single most likely reason this source shows
+    // zero, and a bare "0" is indistinguishable from "looked, found nothing."
+    // Say which it is.
+    if (!toolNames.sessionList) {
+      return {
+        candidates: [], error: null,
+        detected: [{ key: 'claude:not-configured', label: 'no session-list tool configured (sessionList is unset)', outcome: 'not-configured' }],
+      };
+    }
 
     let result;
     try {

@@ -278,17 +278,60 @@ describe('createApp.runSlackTriage', () => {
     status: 'completed', summary: 'All set, thread resolved', reason: 'thanked and confirmed',
   }];
 
+  // Real, live-captured envelope: slack_read_thread returns
+  // {messages, pagination_info} as JSON, not a bare text blob.
+  function slackThreadResponse(rawText) {
+    return {
+      content: [{ text: JSON.stringify({ messages: rawText, pagination_info: slackThread.paginationInfo }) }],
+      isError: false,
+    };
+  }
+
   function mockCallMcpTool({ rawText = slackThread.rawText } = {}) {
     return vi.fn(async (name, args) => {
       if (name === TOOL_NAMES.slackSearch) {
         return { content: [{ text: REAL_ISH_SLACK_SEARCH_TEXT }], isError: false };
       }
       if (name === TOOL_NAMES.slackReadThread) {
-        return { content: [{ text: rawText }], isError: false };
+        return slackThreadResponse(rawText);
       }
       throw new Error(`unexpected tool call: ${name} ${JSON.stringify(args)}`);
     });
   }
+
+  // The exact production failure: every detected thread came back
+  // "fetch-failed" because slack_read_thread's real {messages, ...} envelope
+  // isn't a bare string. This asserts the whole path end-to-end against that
+  // real shape — if the envelope handling regresses, added drops to 0 and
+  // every candidate shows fetch-failed again.
+  it('classifies threads from the real {messages, pagination_info} envelope instead of marking them fetch-failed', async () => {
+    const callMcpTool = mockCallMcpTool();
+    const askClaude = vi.fn().mockResolvedValue(JSON.stringify(ONGOING_VERDICT));
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
+    const result = await app.runSlackTriage({ force: true });
+
+    expect(result.added).toBe(1);
+    expect(result.aiCalled).toBe(true);
+    expect(result.detected.every((d) => d.outcome !== 'fetch-failed')).toBe(true);
+    // And the label came from the thread's real text, not the #channel fallback.
+    expect(result.detected[0].label).not.toMatch(/^#/);
+  });
+
+  it('still marks a thread fetch-failed when the envelope genuinely has no usable text', async () => {
+    const callMcpTool = vi.fn(async (name) => {
+      if (name === TOOL_NAMES.slackSearch) return { content: [{ text: REAL_ISH_SLACK_SEARCH_TEXT }], isError: false };
+      if (name === TOOL_NAMES.slackReadThread) {
+        return { content: [{ text: JSON.stringify({ pagination_info: 'no messages key at all' }) }], isError: false };
+      }
+      throw new Error(`unexpected tool call: ${name}`);
+    });
+    const askClaude = vi.fn();
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
+    const result = await app.runSlackTriage({ force: true });
+
+    expect(askClaude).not.toHaveBeenCalled();
+    expect(result.detected.map((d) => d.outcome)).toEqual(['fetch-failed']);
+  });
 
   it('queries Slack with two plain single-clause searches, never a combined OR/paren query', async () => {
     const callMcpTool = mockCallMcpTool();
@@ -621,7 +664,7 @@ describe('createApp resilience — one failing connector must not block the othe
         return { content: [{ text: REAL_ISH_SLACK_SEARCH_TEXT }], isError: false };
       }
       if (name === TOOL_NAMES.slackReadThread) {
-        return { content: [{ text: slackThread.rawText }], isError: false };
+        return { content: [{ text: JSON.stringify({ messages: slackThread.rawText, pagination_info: slackThread.paginationInfo }) }], isError: false };
       }
       throw new Error(`unexpected tool call: ${name}`);
     });
@@ -654,7 +697,7 @@ describe('createApp resilience — one failing connector must not block the othe
         throw new Error('connector invalidated, needs reconnect');
       }
       if (name === TOOL_NAMES.slackReadThread) {
-        return { content: [{ text: slackThread.rawText }], isError: false };
+        return { content: [{ text: JSON.stringify({ messages: slackThread.rawText, pagination_info: slackThread.paginationInfo }) }], isError: false };
       }
       throw new Error(`unexpected tool call: ${name}`);
     });

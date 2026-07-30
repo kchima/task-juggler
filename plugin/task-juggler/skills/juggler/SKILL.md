@@ -18,9 +18,15 @@ names or shapes from documentation, since this environment's tool names carry
 instance-specific prefixes (e.g. `mcp__<uuid>__slack_read_thread`):
 
 - Every connected Slack connector: note the server prefix for its
-  `slack_read_thread` tool. Its response has no `structuredContent` — the thread
-  comes back as a single formatted text blob in `content[0].text`. Treat that raw
-  text as the canonical context directly; don't try to parse fields out of it.
+  `slack_read_thread` and search tools. **Both return a JSON envelope, not a bare
+  text blob** — `slack_read_thread` gives `{messages, pagination_info}` and search
+  gives `{results, pagination_info}`, where the thread/search body is the string
+  inside `.messages` / `.results`. This is live-verified and worth being exact
+  about: an earlier version of this doc claimed the thread arrived as raw text in
+  `content[0].text`, and code written against that assumption treated *every real
+  thread* as unfetchable, while a bare-string test fixture passed happily. Treat
+  the extracted `.messages` string as the canonical context; don't parse fields
+  out of it beyond that.
 - Every connected Linear connector (there may be more than one — Linear OAuth is
   workspace-scoped, so each workspace is a separate connector instance): call
   `list_teams` on each to get its workspace/team name, and note its server

@@ -23,13 +23,16 @@
         throw new Error('connector invalidated, needs reconnect');
       }
       if (name === MOCK_TOOL_NAMES.slackReadThread) {
-        if (args.channel_id === MOCK_SLACK_DISCOVERY_THREAD.channelId) {
-          return { content: [{ text: MOCK_SLACK_DISCOVERY_THREAD.rawText }], isError: false };
-        }
-        const text = state.slackVersion === 1
-          ? MOCK_SLACK_THREAD_V1.rawText
-          : MOCK_SLACK_THREAD_V1.rawText + '\nNEW REPLY';
-        return { content: [{ text }], isError: false };
+        // Real, live-captured envelope: {messages, pagination_info} serialized
+        // as JSON — NOT a bare text blob. The earlier bare-blob mock is what
+        // let a real production bug (every thread "fetch-failed") pass here.
+        const text = args.channel_id === MOCK_SLACK_DISCOVERY_THREAD.channelId
+          ? MOCK_SLACK_DISCOVERY_THREAD.rawText
+          : (state.slackVersion === 1 ? MOCK_SLACK_THREAD_V1.rawText : MOCK_SLACK_THREAD_V1.rawText + '\nNEW REPLY');
+        return {
+          content: [{ text: JSON.stringify({ messages: text, pagination_info: 'There are no more messages in this thread.\n' }) }],
+          isError: false,
+        };
       }
       if (name === `${MOCK_TOOL_NAMES.linearWorkspaces.Acme}get_issue`) {
         return { structuredContent: MOCK_LINEAR_ISSUE, isError: false };

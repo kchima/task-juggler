@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { unwrapMcpResult, fetchRawContext } from '../src/mcpAdapters.js';
+import { unwrapMcpResult, fetchRawContext, slackThreadText } from '../src/mcpAdapters.js';
 import acmeIssue from './fixtures/linear-acme-issue.json' with { type: 'json' };
 import slackThread from './fixtures/slack-thread.json' with { type: 'json' };
 
@@ -9,9 +9,15 @@ describe('unwrapMcpResult', () => {
     expect(unwrapMcpResult(result)).toEqual(acmeIssue);
   });
 
-  it('falls back to content[0].text as plain text when there is no structuredContent (Slack shape)', () => {
+  it('falls back to content[0].text as plain text when the text is not JSON', () => {
     const result = { content: [{ text: slackThread.rawText }], isError: false };
     expect(unwrapMcpResult(result)).toBe(slackThread.rawText);
+  });
+
+  it('parses a JSON-encoded Slack envelope into an object — the behavior that made a bare-string assumption fail against real data', () => {
+    const payload = { messages: slackThread.rawText, pagination_info: slackThread.paginationInfo };
+    const result = { content: [{ text: JSON.stringify(payload) }], isError: false };
+    expect(unwrapMcpResult(result)).toEqual(payload);
   });
 
   it('parses content[0].text as JSON when it looks like JSON', () => {
@@ -29,14 +35,49 @@ describe('unwrapMcpResult', () => {
   });
 });
 
+// Regression guard for a real production bug: slack_read_thread returns an
+// ENVELOPE — {messages, pagination_info} — which unwrapMcpResult turns into an
+// object. Code that assumed a bare string treated every real thread as
+// unfetchable ("fetch-failed" for all of them), while the old bare-blob test
+// fixture passed, because a non-JSON blob fails JSON.parse and falls through
+// to a string. Reality always parses.
+describe('slackThreadText', () => {
+  it('extracts .messages from the real {messages, pagination_info} envelope', () => {
+    const envelope = { messages: slackThread.rawText, pagination_info: slackThread.paginationInfo };
+    expect(slackThreadText(envelope)).toBe(slackThread.rawText);
+  });
+
+  it('passes a bare string straight through (tolerates a simpler connector shape)', () => {
+    expect(slackThreadText(slackThread.rawText)).toBe(slackThread.rawText);
+  });
+
+  it('returns null when there is no usable thread text, rather than an object that silently fails downstream', () => {
+    expect(slackThreadText(null)).toBeNull();
+    expect(slackThreadText({})).toBeNull();
+    expect(slackThreadText({ pagination_info: 'x' })).toBeNull();
+    expect(slackThreadText({ messages: 42 })).toBeNull();
+  });
+
+  it('composes with unwrapMcpResult on the exact real response, via both transports', () => {
+    const payload = { messages: slackThread.rawText, pagination_info: slackThread.paginationInfo };
+    const asText = { content: [{ text: JSON.stringify(payload) }], isError: false };
+    const asStructured = { structuredContent: payload, isError: false };
+    expect(slackThreadText(unwrapMcpResult(asText))).toBe(slackThread.rawText);
+    expect(slackThreadText(unwrapMcpResult(asStructured))).toBe(slackThread.rawText);
+  });
+});
+
 describe('fetchRawContext', () => {
   const toolNames = {
     slackReadThread: 'mcp__slack__slack_read_thread',
     linearWorkspaces: { Acme: 'mcp__plugin_linear_linear__' },
   };
 
-  it('fetches a Slack thread as raw text', async () => {
-    const callMcpTool = vi.fn().mockResolvedValue({ content: [{ text: slackThread.rawText }], isError: false });
+  it('fetches a Slack thread and unwraps the real envelope down to its text', async () => {
+    const callMcpTool = vi.fn().mockResolvedValue({
+      content: [{ text: JSON.stringify({ messages: slackThread.rawText, pagination_info: slackThread.paginationInfo }) }],
+      isError: false,
+    });
     const task = { source: 'slack', sourceRef: { channelId: slackThread.channelId, threadTs: slackThread.threadTs } };
     const raw = await fetchRawContext(task, callMcpTool, toolNames);
     expect(callMcpTool).toHaveBeenCalledWith('mcp__slack__slack_read_thread', {
