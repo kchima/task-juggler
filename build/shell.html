@@ -35,12 +35,25 @@
   #jg-errors ul { margin: 6px 0 0; padding-left: 18px; opacity: 0.85; }
   #jg-errors li { margin-bottom: 2px; }
   @media (prefers-color-scheme: dark) { #jg-errors summary { color: #f0b429; } }
+  #jg-candidates { font-size: 12px; margin-bottom: 10px; opacity: 0.85; }
+  #jg-candidates > summary { cursor: pointer; user-select: none; }
+  #jg-candidates details { margin: 4px 0 4px 14px; }
+  #jg-candidates details summary { cursor: pointer; user-select: none; }
+  #jg-candidates ul { margin: 4px 0 0; padding-left: 18px; }
+  #jg-candidates li { margin-bottom: 2px; }
+  #jg-candidates li.jg-candidate-empty { opacity: 0.6; font-style: italic; }
 </style>
 </head>
 <body>
 <details id="jg-errors" hidden>
   <summary></summary>
   <ul></ul>
+</details>
+<details id="jg-candidates">
+  <summary></summary>
+  <details data-group="slack"><summary>Slack (0)</summary><ul></ul></details>
+  <details data-group="claude"><summary>Claude (0)</summary><ul></ul></details>
+  <details data-group="linear"><summary>Linear (0)</summary><ul></ul></details>
 </details>
 <header>
   <h1>Task Juggler</h1>

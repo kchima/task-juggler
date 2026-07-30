@@ -1,5 +1,5 @@
 import { createApp } from './app.js';
-import { renderList, renderCard, nextStatus, renderErrors } from './ui.js';
+import { renderList, renderCard, nextStatus, renderErrors, renderCandidates } from './ui.js';
 import { mergeSeedTasks, readSeedFromDocument } from './seedMerge.js';
 import { loadTasks, saveTasks } from './storage.js';
 import { sortTasks } from './scoring.js';
@@ -101,6 +101,11 @@ export function mountApp(doc, app, options = {}) {
         ...(discoverResult.errors ?? []),
         ...(slackResult.errors ?? []),
       ]);
+      renderCandidates(doc.getElementById('jg-candidates'), {
+        slack: slackResult.detected ?? [],
+        claude: discoverResult.detected?.claude ?? [],
+        linear: discoverResult.detected?.linear ?? [],
+      });
     } catch (err) {
       // A failing connector must never take the list down with it — this
       // catch is now only for something outside every per-source try/catch

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { nextStatus, renderList, renderCard, renderErrors } from '../src/ui.js';
+import { nextStatus, renderList, renderCard, renderErrors, renderCandidates } from '../src/ui.js';
 
 function noopHandlers() {
   return {
@@ -50,6 +50,73 @@ describe('renderErrors', () => {
     renderErrors(container, []);
     expect(container.hidden).toBe(true);
     expect(container.querySelector('ul').children).toHaveLength(0);
+  });
+});
+
+describe('renderCandidates', () => {
+  function candidatesFixture() {
+    document.body.innerHTML = `
+      <details id="jg-candidates">
+        <summary></summary>
+        <details data-group="slack"><summary></summary><ul></ul></details>
+        <details data-group="claude"><summary></summary><ul></ul></details>
+        <details data-group="linear"><summary></summary><ul></ul></details>
+      </details>
+    `;
+    return document.getElementById('jg-candidates');
+  }
+
+  it('never hides, even with zero candidates — "found nothing" is itself worth confirming', () => {
+    const container = candidatesFixture();
+    renderCandidates(container, {});
+    expect(container.hidden).toBe(false);
+    expect(container.querySelector(':scope > summary').textContent).toContain('0');
+  });
+
+  it('shows "none this scan" per empty group instead of an empty list', () => {
+    const container = candidatesFixture();
+    renderCandidates(container, {});
+    for (const group of ['slack', 'claude', 'linear']) {
+      const el = container.querySelector(`[data-group="${group}"]`);
+      expect(el.querySelector('li').textContent).toBe('none this scan');
+    }
+  });
+
+  it('splits detected items into their own group with outcome-prefixed labels', () => {
+    const container = candidatesFixture();
+    renderCandidates(container, {
+      slack: [
+        { key: 'slack:C1:1', label: 'Priya asked Dana to review pricing copy', outcome: 'added' },
+        { key: 'slack:C2:2', label: 'thanks, all set', outcome: 'unchanged' },
+      ],
+      claude: [{ key: 'claude_session:s1', label: 'Payments webhook retry backoff', outcome: 'added' }],
+      linear: [],
+    });
+
+    expect(container.querySelector(':scope > summary').textContent).toContain('3');
+
+    const slackGroup = container.querySelector('[data-group="slack"]');
+    expect(slackGroup.querySelector('summary').textContent).toBe('Slack (2)');
+    expect([...slackGroup.querySelectorAll('li')].map((li) => li.textContent)).toEqual([
+      '[added] Priya asked Dana to review pricing copy',
+      '[unchanged] thanks, all set',
+    ]);
+
+    const claudeGroup = container.querySelector('[data-group="claude"]');
+    expect(claudeGroup.querySelector('summary').textContent).toBe('Claude (1)');
+
+    const linearGroup = container.querySelector('[data-group="linear"]');
+    expect(linearGroup.querySelector('summary').textContent).toBe('Linear (0)');
+    expect(linearGroup.querySelector('li').textContent).toBe('none this scan');
+  });
+
+  it('clears a previously-populated group back to "none this scan" on the next call', () => {
+    const container = candidatesFixture();
+    renderCandidates(container, { slack: [{ key: 'slack:C1:1', label: 'x', outcome: 'added' }] });
+    renderCandidates(container, {});
+    const slackGroup = container.querySelector('[data-group="slack"]');
+    expect(slackGroup.querySelectorAll('li')).toHaveLength(1);
+    expect(slackGroup.querySelector('li').textContent).toBe('none this scan');
   });
 });
 

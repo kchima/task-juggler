@@ -31,6 +31,38 @@ export function renderErrors(container, errors) {
   }
 }
 
+// "Skip it, degrade gracefully" answers *whether* discovery kept working —
+// it says nothing about *what discovery actually saw*. This panel is the
+// answer to "is it even finding my threads" without needing to guess from
+// the outside: every candidate the last scan looked at, and what happened
+// to it. Unlike renderErrors, this never hides — "found nothing this scan"
+// is itself something worth being able to confirm, not just failures.
+export function renderCandidates(container, { slack = [], claude = [], linear = [] } = {}) {
+  const total = slack.length + claude.length + linear.length;
+  container.querySelector(':scope > summary').textContent = `Detected this scan (${total})`;
+  renderCandidateGroup(container.querySelector('[data-group="slack"]'), 'Slack', slack);
+  renderCandidateGroup(container.querySelector('[data-group="claude"]'), 'Claude', claude);
+  renderCandidateGroup(container.querySelector('[data-group="linear"]'), 'Linear', linear);
+}
+
+function renderCandidateGroup(groupEl, label, items) {
+  groupEl.querySelector('summary').textContent = `${label} (${items.length})`;
+  const list = groupEl.querySelector('ul');
+  list.innerHTML = '';
+  if (!items.length) {
+    const li = document.createElement('li');
+    li.className = 'jg-candidate-empty';
+    li.textContent = 'none this scan';
+    list.appendChild(li);
+    return;
+  }
+  for (const item of items) {
+    const li = document.createElement('li');
+    li.textContent = `[${item.outcome}] ${item.label}`;
+    list.appendChild(li);
+  }
+}
+
 export function nextStatus(status) {
   const idx = STATUS_CYCLE.indexOf(status);
   return STATUS_CYCLE[(idx + 1) % STATUS_CYCLE.length];

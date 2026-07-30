@@ -53,6 +53,20 @@ async function mapWithConcurrency(items, limit, fn) {
   return results;
 }
 
+// Best-effort human-readable label for the "detected candidates" debug
+// panel — skips the raw thread's header lines to surface the actual first
+// message, falling back to the channel id when there's nothing to show yet
+// (fetch failed, or not fetched at all).
+function threadLabel(rawText, ref) {
+  if (typeof rawText !== 'string') return `#${ref.channelId}`;
+  const firstContentLine = rawText.split('\n').find((line) => {
+    const trimmed = line.trim();
+    return trimmed && !trimmed.startsWith('=== ') && !trimmed.startsWith('From:') && !trimmed.startsWith('Time:') && !trimmed.startsWith('Message TS:');
+  });
+  const snippet = (firstContentLine ?? '').trim().slice(0, 80);
+  return snippet || `#${ref.channelId}`;
+}
+
 function blankTask({
   title, source, sourceRef, ballInUsersCourt, now,
   sourcePriority = null, dueDate = null, summary = '', waitingOn = null,
@@ -150,18 +164,25 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
   async function discoverLinearCandidates() {
     const candidates = [];
     const errors = [];
+    const detected = [];
     for (const [workspaceLabel, prefix] of Object.entries(toolNames.linearWorkspaces ?? {})) {
       try {
         const result = await callMcpTool(`${prefix}list_issues`, { assignee: 'me' });
         const issues = unwrapMcpResult(result)?.issues ?? [];
         for (const issue of issues) {
-          if (isUnresolvedLinearIssue(issue)) candidates.push(linearCandidateToTask(issue, workspaceLabel));
+          if (isUnresolvedLinearIssue(issue)) {
+            candidates.push(linearCandidateToTask(issue, workspaceLabel));
+            // outcome (added vs. already-tracked) isn't knowable here — this
+            // function doesn't see the existing task list — so discoverNewTasks
+            // fills it in afterward by checking sourceRefKey membership.
+            detected.push({ key: `linear:${workspaceLabel}:${issue.id}`, label: `[${workspaceLabel}] ${issue.title}`, outcome: 'candidate' });
+          }
         }
       } catch (err) {
         errors.push(`Linear (${workspaceLabel}): ${err?.message ?? 'connector error'}`);
       }
     }
-    return { candidates, errors };
+    return { candidates, errors, detected };
   }
 
   async function discoverTodoistCandidates() {
@@ -189,7 +210,7 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
   async function slackTriageForRefs(refsByKey, trackedByKey) {
     const scanned = refsByKey.size;
     if (scanned === 0) {
-      return { scanned: 0, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, newTasks: [] };
+      return { scanned: 0, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, newTasks: [], detected: [] };
     }
 
     const fetched = await mapWithConcurrency([...refsByKey.entries()], CONCURRENCY, async ([key, ref]) => {
@@ -204,17 +225,34 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
         return null; // one thread's fetch failure must not block the rest of the batch
       }
     });
+    const fetchedByKey = new Map(fetched.filter(Boolean).map((e) => [e.key, e]));
 
+    // Built up as every ref is looked at (not just the ones that end up
+    // classified) so the debug panel can show the full picture: what was
+    // found, and what happened to each thing — unchanged, fetch-failed,
+    // classified-and-X, or never classified at all.
+    const detected = new Map();
     const watermarks = loadWatermarks(storage);
-    const toClassify = fetched.filter((entry) => {
-      if (!entry) return false;
-      const tracked = trackedByKey.get(entry.key);
-      const priorHash = tracked ? tracked.contextHash : watermarks[entry.key];
-      return priorHash !== entry.hash; // unchanged since last look -> nothing to do
-    });
+    const toClassify = [];
+    for (const [key, ref] of refsByKey) {
+      const entry = fetchedByKey.get(key);
+      const label = threadLabel(entry?.rawText, ref);
+      if (!entry) {
+        detected.set(key, { key, label, outcome: 'fetch-failed' });
+        continue;
+      }
+      const tracked = trackedByKey.get(key);
+      const priorHash = tracked ? tracked.contextHash : watermarks[key];
+      if (priorHash === entry.hash) {
+        detected.set(key, { key, label, outcome: 'unchanged' });
+      } else {
+        toClassify.push(entry);
+        detected.set(key, { key, label, outcome: 'pending' });
+      }
+    }
 
     if (toClassify.length === 0) {
-      return { scanned, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, newTasks: [] };
+      return { scanned, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, newTasks: [], detected: [...detected.values()] };
     }
 
     const rawVerdicts = await askClaude(
@@ -228,7 +266,8 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
 
     for (const entry of toClassify) {
       const verdict = verdicts?.get(entry.key);
-      if (!verdict) { unparsed++; continue; }
+      const prior = detected.get(entry.key);
+      if (!verdict) { unparsed++; detected.set(entry.key, { ...prior, outcome: 'unparsed' }); continue; }
 
       const tracked = trackedByKey.get(entry.key);
       if (tracked) {
@@ -243,6 +282,7 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
         patchTask(tracked.id, patch, storage);
         updated++;
         if (verdict.isOngoing) ongoing++;
+        detected.set(entry.key, { ...prior, outcome: verdict.isOngoing ? 'updated-ongoing' : 'updated-resolved' });
       } else if (verdict.isOngoing) {
         newTasks.push(blankTask({
           title: verdict.summary || `Slack thread in ${entry.ref.channelId}`,
@@ -255,8 +295,10 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
         }));
         added++;
         ongoing++;
+        detected.set(entry.key, { ...prior, outcome: 'added' });
       } else {
         skippedResolved++;
+        detected.set(entry.key, { ...prior, outcome: 'skipped-resolved' });
       }
 
       // Watermark every thread that got a real verdict, whichever way it
@@ -266,7 +308,7 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
       setWatermark(entry.key, entry.hash, storage);
     }
 
-    return { scanned, ongoing, updated, added, skippedResolved, unparsed, aiCalled: true, newTasks };
+    return { scanned, ongoing, updated, added, skippedResolved, unparsed, aiCalled: true, newTasks, detected: [...detected.values()] };
   }
 
   // Slack discovery + refresh, batched: one AI call classifies every thread
@@ -278,12 +320,12 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
   async function runSlackTriage({ force = false } = {}) {
     const nowMs = now().getTime();
     if (!force && nowMs - lastSlackTriageAt < REFRESH_DEBOUNCE_MS) {
-      return { skipped: true, scanned: 0, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, unreadCheckAvailable: false, errors: [] };
+      return { skipped: true, scanned: 0, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, unreadCheckAvailable: false, errors: [], detected: [] };
     }
     lastSlackTriageAt = nowMs;
 
     if (!toolNames.slackReadThread) {
-      return { skipped: false, scanned: 0, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, unreadCheckAvailable: false, errors: [] };
+      return { skipped: false, scanned: 0, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, unreadCheckAvailable: false, errors: [], detected: [] };
     }
 
     const dismissedKeys = new Set(loadDismissedKeys(storage));
@@ -339,13 +381,13 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
   // as "no in-flight sessions." Wiring up session_info itself needs a fresh
   // probe from within Cowork first — see the plugin skill notes.
   async function discoverClaudeSessionCandidates(blockedKeys, watermarks) {
-    if (!toolNames.sessionList) return { candidates: [], error: null };
+    if (!toolNames.sessionList) return { candidates: [], error: null, detected: [] };
 
     let result;
     try {
       result = await callMcpTool(toolNames.sessionList, { limit: 25 });
     } catch (err) {
-      return { candidates: [], error: `Claude sessions: ${err?.message ?? 'connector error'}` };
+      return { candidates: [], error: `Claude sessions: ${err?.message ?? 'connector error'}`, detected: [] };
     }
     const sessions = unwrapMcpResult(result);
     const list = Array.isArray(sessions) ? sessions : (Array.isArray(sessions?.sessions) ? sessions.sessions : null);
@@ -354,36 +396,51 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
       return {
         candidates: [],
         error: `list_sessions returned an unrecognized shape (expected an array or {sessions: [...]}, got ${typeof sessions}) — Claude session ingestion is coded against ccd_session_mgmt only and will not guess at a different server's format.`,
+        detected: [],
       };
     }
 
+    // Stale/archived sessions are excluded before the debug view even sees
+    // them — with up to 25 sessions in play, showing every ancient one would
+    // bury the signal, and "too old to matter" is a settled, cheap filter.
+    const detected = [];
     const candidates = list.filter((s) => {
       if (!isCandidateClaudeSession(s, now())) return false;
       const key = sourceRefKey({ source: 'claude_session', sourceRef: { sessionId: s.sessionId } });
-      if (blockedKeys.has(key)) return false;
-      return !isUnchangedSinceLastScan(key, changeSignalFor('claude_session', s), watermarks);
+      if (blockedKeys.has(key)) return false; // dismissed — permanently invisible by design
+      const unchanged = isUnchangedSinceLastScan(key, changeSignalFor('claude_session', s), watermarks);
+      if (unchanged) detected.push({ key, label: s.title, outcome: 'unchanged' });
+      return !unchanged;
     });
 
     const classified = await mapWithConcurrency(candidates, CONCURRENCY, async (session) => {
+      const key = sourceRefKey({ source: 'claude_session', sourceRef: { sessionId: session.sessionId } });
       try {
-        const key = sourceRefKey({ source: 'claude_session', sourceRef: { sessionId: session.sessionId } });
         const eventsResult = await callMcpTool(toolNames.sessionEvents, {
           session_id: session.sessionId, limit: SESSION_TAIL_MESSAGES,
         });
         const tail = unwrapMcpResult(eventsResult);
 
         setWatermark(key, changeSignalFor('claude_session', session), storage);
-        if (typeof tail !== 'string' || !tail.trim()) return null;
+        if (typeof tail !== 'string' || !tail.trim()) {
+          detected.push({ key, label: session.title, outcome: 'no-transcript' });
+          return null;
+        }
 
         const judgment = parseSessionJudgment(await askClaude(buildSessionJudgmentPrompt(session, tail), []));
-        if (!judgment?.needsAttention) return null;
+        if (!judgment?.needsAttention) {
+          detected.push({ key, label: session.title, outcome: 'not-needed' });
+          return null;
+        }
+        detected.push({ key, label: session.title, outcome: 'added' });
         return claudeSessionCandidateToTask(session, judgment);
       } catch {
+        detected.push({ key, label: session.title, outcome: 'fetch-failed' });
         return null; // one session's failure must not block the rest of the batch
       }
     });
 
-    return { candidates: classified.filter(Boolean), error: null };
+    return { candidates: classified.filter(Boolean), error: null, detected };
   }
 
   // Known minor gap, not a correctness issue: unlike refreshAll/runSlackTriage,
@@ -415,6 +472,7 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
     }));
 
     const existing = getTasks();
+    const existingKeys = new Set(existing.map(sourceRefKey));
     const merged = mergeSeedTasks(existing, candidateTasks, dismissedKeys);
     saveTasks(merged, storage);
 
@@ -423,7 +481,16 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
       ...(todoistResult.error ? [todoistResult.error] : []),
       ...(sessionResult.error ? [sessionResult.error] : []),
     ];
-    return { added: merged.length - existing.length, errors };
+    // Linear can't know "added vs. already-tracked" for itself — it doesn't
+    // see the existing task list — so that's resolved here instead.
+    const linearDetected = linearResult.detected.map((d) => ({
+      ...d, outcome: existingKeys.has(d.key) ? 'already-tracked' : 'added',
+    }));
+    return {
+      added: merged.length - existing.length,
+      errors,
+      detected: { linear: linearDetected, claude: sessionResult.detected },
+    };
   }
 
   function addManualTask(title) {

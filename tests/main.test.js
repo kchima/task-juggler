@@ -4,6 +4,12 @@ import { mountApp } from '../src/main.js';
 function domFixture() {
   document.body.innerHTML = `
     <details id="jg-errors" hidden><summary></summary><ul></ul></details>
+    <details id="jg-candidates">
+      <summary></summary>
+      <details data-group="slack"><summary></summary><ul></ul></details>
+      <details data-group="claude"><summary></summary><ul></ul></details>
+      <details data-group="linear"><summary></summary><ul></ul></details>
+    </details>
     <input id="jg-add-input" />
     <button id="jg-add-btn"></button>
     <button id="jg-view-toggle"></button>
@@ -152,6 +158,48 @@ describe('mountApp', () => {
     await Promise.resolve();
     const errorsEl = document.getElementById('jg-errors');
     expect(errorsEl.querySelectorAll('li')).toHaveLength(3);
+  });
+
+  it('the candidates panel shows what each source detected, split by group, and stays visible even with zero found', async () => {
+    const app = fakeApp({
+      runSlackTriage: vi.fn().mockResolvedValue({
+        skipped: false, scanned: 2, ongoing: 1, updated: 0, added: 1, skippedResolved: 1, unparsed: 0, aiCalled: true,
+        detected: [
+          { key: 'slack:C1:1', label: 'Priya asked Dana to review pricing copy', outcome: 'added' },
+          { key: 'slack:C2:2', label: 'thanks, all set', outcome: 'skipped-resolved' },
+        ],
+      }),
+      discoverNewTasks: vi.fn().mockResolvedValue({
+        added: 1, errors: [],
+        detected: {
+          claude: [{ key: 'claude_session:s1', label: 'Payments webhook retry backoff', outcome: 'added' }],
+          linear: [],
+        },
+      }),
+    });
+    mountApp(document, app);
+    document.getElementById('jg-refresh-btn').click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const candidatesEl = document.getElementById('jg-candidates');
+    expect(candidatesEl.hidden).toBe(false);
+    expect(candidatesEl.querySelector(':scope > summary').textContent).toContain('3');
+
+    const slackGroup = candidatesEl.querySelector('[data-group="slack"]');
+    expect(slackGroup.querySelector('summary').textContent).toContain('Slack (2)');
+    const slackItems = [...slackGroup.querySelectorAll('li')].map((li) => li.textContent);
+    expect(slackItems).toEqual([
+      '[added] Priya asked Dana to review pricing copy',
+      '[skipped-resolved] thanks, all set',
+    ]);
+
+    const claudeGroup = candidatesEl.querySelector('[data-group="claude"]');
+    expect(claudeGroup.querySelector('summary').textContent).toContain('Claude (1)');
+
+    const linearGroup = candidatesEl.querySelector('[data-group="linear"]');
+    expect(linearGroup.querySelector('summary').textContent).toContain('Linear (0)');
+    expect(linearGroup.querySelector('li').textContent).toBe('none this scan');
   });
 
   it('in offline mode, refresh does not call the app and says so instead of throwing', async () => {
