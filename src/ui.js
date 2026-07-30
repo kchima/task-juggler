@@ -10,6 +10,27 @@ const STATUS_LABEL = {
   completed: 'Completed',
 };
 
+// Connector/fetch failures degrade gracefully everywhere in app.js (one
+// source failing never blocks the others), but "degrade gracefully" must not
+// mean "vanish silently" — this surfaces exactly what each catch caught, in
+// a dropdown collapsed by default so it's invisible on the happy path.
+export function renderErrors(container, errors) {
+  const list = container.querySelector('ul');
+  if (!errors.length) {
+    container.hidden = true;
+    list.innerHTML = '';
+    return;
+  }
+  container.hidden = false;
+  container.querySelector('summary').textContent = `⚠ ${errors.length} issue${errors.length === 1 ? '' : 's'}`;
+  list.innerHTML = '';
+  for (const message of errors) {
+    const li = document.createElement('li');
+    li.textContent = message;
+    list.appendChild(li);
+  }
+}
+
 export function nextStatus(status) {
   const idx = STATUS_CYCLE.indexOf(status);
   return STATUS_CYCLE[(idx + 1) % STATUS_CYCLE.length];

@@ -30,9 +30,18 @@
   .jg-refresh, .jg-delete, .jg-reopen { flex-shrink: 0; }
   .jg-card { border: 1px solid rgba(128,128,128,0.35); border-radius: 10px; padding: 16px; max-width: 480px; }
   .jg-card h2 { margin: 0 0 8px; font-size: 18px; }
+  #jg-errors { font-size: 12px; margin-bottom: 10px; }
+  #jg-errors summary { cursor: pointer; color: #b45309; user-select: none; }
+  #jg-errors ul { margin: 6px 0 0; padding-left: 18px; opacity: 0.85; }
+  #jg-errors li { margin-bottom: 2px; }
+  @media (prefers-color-scheme: dark) { #jg-errors summary { color: #f0b429; } }
 </style>
 </head>
 <body>
+<details id="jg-errors" hidden>
+  <summary></summary>
+  <ul></ul>
+</details>
 <header>
   <h1>Task Juggler</h1>
   <input id="jg-add-input" type="text" placeholder="Add a task, or paste a Slack/Linear/any link…" />

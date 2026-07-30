@@ -3,6 +3,7 @@ import { mountApp } from '../src/main.js';
 
 function domFixture() {
   document.body.innerHTML = `
+    <details id="jg-errors" hidden><summary></summary><ul></ul></details>
     <input id="jg-add-input" />
     <button id="jg-add-btn"></button>
     <button id="jg-view-toggle"></button>
@@ -112,15 +113,45 @@ describe('mountApp', () => {
     expect(status).toContain('1 resolved');
   });
 
-  it('surfaces a disabled-Claude-session-ingestion note when discoverNewTasks reports a shape mismatch, without hiding the rest of the status', async () => {
+  it('the errors dropdown stays hidden when nothing failed', async () => {
+    const app = fakeApp();
+    mountApp(document, app);
+    document.getElementById('jg-refresh-btn').click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(document.getElementById('jg-errors').hidden).toBe(true);
+  });
+
+  it('a discoverNewTasks shape-mismatch error shows up in the errors dropdown, not the status line', async () => {
     const app = fakeApp({
-      discoverNewTasks: vi.fn().mockResolvedValue({ added: 0, sessionDiscoveryError: 'list_sessions returned an unrecognized shape' }),
+      discoverNewTasks: vi.fn().mockResolvedValue({ added: 0, errors: ['list_sessions returned an unrecognized shape'] }),
     });
     mountApp(document, app);
     document.getElementById('jg-refresh-btn').click();
     await Promise.resolve();
     await Promise.resolve();
-    expect(document.getElementById('jg-status').textContent).toContain('Claude session ingestion disabled');
+    const errorsEl = document.getElementById('jg-errors');
+    expect(errorsEl.hidden).toBe(false);
+    expect(errorsEl.querySelector('summary').textContent).toContain('1 issue');
+    expect(errorsEl.querySelector('ul').textContent).toContain('list_sessions returned an unrecognized shape');
+    expect(document.getElementById('jg-status').textContent).not.toContain('list_sessions');
+  });
+
+  it('combines errors from refreshAll, discoverNewTasks, and runSlackTriage into one dropdown', async () => {
+    const app = fakeApp({
+      refreshAll: vi.fn().mockResolvedValue({ skipped: false, results: [], errors: ['Some task: connector error'] }),
+      discoverNewTasks: vi.fn().mockResolvedValue({ added: 0, errors: ['Linear (Acme): connector error'] }),
+      runSlackTriage: vi.fn().mockResolvedValue({
+        skipped: false, scanned: 0, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false,
+        errors: ['Slack search ("is:thread to:me after:2026-07-29"): connector error'],
+      }),
+    });
+    mountApp(document, app);
+    document.getElementById('jg-refresh-btn').click();
+    await Promise.resolve();
+    await Promise.resolve();
+    const errorsEl = document.getElementById('jg-errors');
+    expect(errorsEl.querySelectorAll('li')).toHaveLength(3);
   });
 
   it('in offline mode, refresh does not call the app and says so instead of throwing', async () => {
@@ -149,6 +180,8 @@ describe('mountApp', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(document.getElementById('jg-status').textContent).toContain('connector exploded');
+    expect(document.getElementById('jg-errors').hidden).toBe(false);
+    expect(document.getElementById('jg-errors').querySelector('ul').textContent).toContain('connector exploded');
   });
 
   it('does not auto-refresh when autoRefreshMs is not passed (default off, matches all other tests in this file)', () => {

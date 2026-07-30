@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { nextStatus, renderList, renderCard } from '../src/ui.js';
+import { nextStatus, renderList, renderCard, renderErrors } from '../src/ui.js';
 
 function noopHandlers() {
   return {
@@ -13,6 +13,44 @@ function noopHandlers() {
 
 beforeEach(() => {
   document.body.innerHTML = '<div id="root"></div>';
+});
+
+describe('renderErrors', () => {
+  function errorsFixture() {
+    document.body.innerHTML = '<details id="jg-errors" hidden><summary></summary><ul></ul></details>';
+    return document.getElementById('jg-errors');
+  }
+
+  it('stays hidden and empty when there are no errors', () => {
+    const container = errorsFixture();
+    renderErrors(container, []);
+    expect(container.hidden).toBe(true);
+    expect(container.querySelector('ul').children).toHaveLength(0);
+  });
+
+  it('shows the count and every message when there are errors', () => {
+    const container = errorsFixture();
+    renderErrors(container, ['Linear (Acme): connector error', 'Todoist: connector error']);
+    expect(container.hidden).toBe(false);
+    expect(container.querySelector('summary').textContent).toContain('2 issues');
+    const items = [...container.querySelectorAll('li')].map((li) => li.textContent);
+    expect(items).toEqual(['Linear (Acme): connector error', 'Todoist: connector error']);
+  });
+
+  it('uses singular "issue" for exactly one error', () => {
+    const container = errorsFixture();
+    renderErrors(container, ['Todoist: connector error']);
+    expect(container.querySelector('summary').textContent).toContain('1 issue');
+    expect(container.querySelector('summary').textContent).not.toContain('1 issues');
+  });
+
+  it('re-hides and clears the list on a later call with zero errors (recovered on retry)', () => {
+    const container = errorsFixture();
+    renderErrors(container, ['Todoist: connector error']);
+    renderErrors(container, []);
+    expect(container.hidden).toBe(true);
+    expect(container.querySelector('ul').children).toHaveLength(0);
+  });
 });
 
 describe('nextStatus', () => {

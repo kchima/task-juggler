@@ -1,5 +1,5 @@
 import { createApp } from './app.js';
-import { renderList, renderCard, nextStatus } from './ui.js';
+import { renderList, renderCard, nextStatus, renderErrors } from './ui.js';
 import { mergeSeedTasks, readSeedFromDocument } from './seedMerge.js';
 import { loadTasks, saveTasks } from './storage.js';
 import { sortTasks } from './scoring.js';
@@ -93,13 +93,20 @@ export function mountApp(doc, app, options = {}) {
       const slackNote = slackResult.scanned
         ? `, Slack: ${slackResult.scanned} scanned/${slackResult.ongoing} ongoing/${slackResult.updated} updated/${slackResult.skippedResolved} resolved`
         : '';
-      const errorNote = discoverResult.sessionDiscoveryError ? ' — Claude session ingestion disabled (unexpected response shape)' : '';
       statusEl.textContent = refreshResult.skipped
         ? 'Just refreshed'
-        : `${statusPrefix}ed (${aiCalls} AI call${aiCalls === 1 ? '' : 's'}${addedNote}${slackNote})${errorNote}`;
+        : `${statusPrefix}ed (${aiCalls} AI call${aiCalls === 1 ? '' : 's'}${addedNote}${slackNote})`;
+      renderErrors(doc.getElementById('jg-errors'), [
+        ...(refreshResult.errors ?? []),
+        ...(discoverResult.errors ?? []),
+        ...(slackResult.errors ?? []),
+      ]);
     } catch (err) {
-      // A failing connector must never take the list down with it.
+      // A failing connector must never take the list down with it — this
+      // catch is now only for something outside every per-source try/catch
+      // in app.js (e.g. storage itself failing), which should be rare.
       statusEl.textContent = `Refresh failed: ${err?.message ?? 'unknown error'}`;
+      renderErrors(doc.getElementById('jg-errors'), [err?.message ?? 'unknown error']);
     }
     render();
   }

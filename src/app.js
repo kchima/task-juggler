@@ -79,47 +79,56 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
     return loadTasks(storage);
   }
 
+  // Wrapped end-to-end: a thrown/rejected callMcpTool (connector invalidated,
+  // network error, etc.) must degrade to "this one task didn't refresh," not
+  // take down every other task in the same refreshAll batch — mapWithConcurrency
+  // runs each worker's tasks sequentially within itself, so one uncaught
+  // rejection here would kill that worker's remaining queue too.
   async function refreshTask(task) {
     if (NO_REFRESH_ADAPTER_SOURCES.has(task.source)) {
       return { task, aiCalled: false };
     }
 
-    const raw = await fetchRawContext(task, callMcpTool, toolNames);
-    if (raw == null) return { task, aiCalled: false };
+    try {
+      const raw = await fetchRawContext(task, callMcpTool, toolNames);
+      if (raw == null) return { task, aiCalled: false };
 
-    const canonical = canonicalize(task, raw);
-    const newHash = djb2Hash(canonical);
-    if (newHash === task.contextHash) return { task, aiCalled: false };
+      const canonical = canonicalize(task, raw);
+      const newHash = djb2Hash(canonical);
+      if (newHash === task.contextHash) return { task, aiCalled: false };
 
-    const aiResult = await refreshTaskViaAi(task, canonical, askClaude);
-    if (!aiResult) return { task, aiCalled: true, parseFailed: true };
+      const aiResult = await refreshTaskViaAi(task, canonical, askClaude);
+      if (!aiResult) return { task, aiCalled: true, parseFailed: true };
 
-    const patch = {
-      summary: aiResult.summary,
-      nextAction: aiResult.nextAction,
-      waitingOn: aiResult.waitingOn,
-      ballInUsersCourt: aiResult.ballInUsersCourt,
-      estRemaining: aiResult.estRemaining,
-      lastAiRunAt: now().toISOString(),
-      contextHash: newHash,
-    };
-    if (!task.userPinnedStatus) {
-      patch.status = aiResult.done ? 'completed' : aiResult.status;
+      const patch = {
+        summary: aiResult.summary,
+        nextAction: aiResult.nextAction,
+        waitingOn: aiResult.waitingOn,
+        ballInUsersCourt: aiResult.ballInUsersCourt,
+        estRemaining: aiResult.estRemaining,
+        lastAiRunAt: now().toISOString(),
+        contextHash: newHash,
+      };
+      if (!task.userPinnedStatus) {
+        patch.status = aiResult.done ? 'completed' : aiResult.status;
+      }
+
+      const updated = patchTask(task.id, patch, storage);
+      return { task: updated, aiCalled: true, parseFailed: false };
+    } catch (err) {
+      return { task, aiCalled: false, error: `${task.title}: ${err?.message ?? 'connector error'}` };
     }
-
-    const updated = patchTask(task.id, patch, storage);
-    return { task: updated, aiCalled: true, parseFailed: false };
   }
 
   async function refreshAll({ force = false } = {}) {
     const nowMs = now().getTime();
     if (!force && nowMs - lastRefreshAt < REFRESH_DEBOUNCE_MS) {
-      return { skipped: true, results: [] };
+      return { skipped: true, results: [], errors: [] };
     }
     lastRefreshAt = nowMs;
     const tasks = getTasks().filter((t) => t.status !== 'completed');
     const results = await mapWithConcurrency(tasks, CONCURRENCY, refreshTask);
-    return { skipped: false, results };
+    return { skipped: false, results, errors: results.filter((r) => r.error).map((r) => r.error) };
   }
 
   async function refreshOne(id) {
@@ -134,23 +143,36 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
     return refreshTask(task);
   }
 
+  // Each workspace is caught individually: a live probe found a connector
+  // can go into an "invalidated, needs reconnect" state that rejects the
+  // call outright (not a normal {isError:true} response) — one workspace in
+  // that state must not skip every other workspace's issues too.
   async function discoverLinearCandidates() {
     const candidates = [];
+    const errors = [];
     for (const [workspaceLabel, prefix] of Object.entries(toolNames.linearWorkspaces ?? {})) {
-      const result = await callMcpTool(`${prefix}list_issues`, { assignee: 'me' });
-      const issues = unwrapMcpResult(result)?.issues ?? [];
-      for (const issue of issues) {
-        if (isUnresolvedLinearIssue(issue)) candidates.push(linearCandidateToTask(issue, workspaceLabel));
+      try {
+        const result = await callMcpTool(`${prefix}list_issues`, { assignee: 'me' });
+        const issues = unwrapMcpResult(result)?.issues ?? [];
+        for (const issue of issues) {
+          if (isUnresolvedLinearIssue(issue)) candidates.push(linearCandidateToTask(issue, workspaceLabel));
+        }
+      } catch (err) {
+        errors.push(`Linear (${workspaceLabel}): ${err?.message ?? 'connector error'}`);
       }
     }
-    return candidates;
+    return { candidates, errors };
   }
 
   async function discoverTodoistCandidates() {
-    if (!toolNames.todoistFindTasks) return [];
-    const result = await callMcpTool(toolNames.todoistFindTasks, { filter: 'today | overdue | p1', limit: 50 });
-    const items = unwrapMcpResult(result)?.tasks ?? [];
-    return items.filter((t) => passesTodoistGate(t, now())).map(todoistCandidateToTask);
+    if (!toolNames.todoistFindTasks) return { candidates: [], error: null };
+    try {
+      const result = await callMcpTool(toolNames.todoistFindTasks, { filter: 'today | overdue | p1', limit: 50 });
+      const items = unwrapMcpResult(result)?.tasks ?? [];
+      return { candidates: items.filter((t) => passesTodoistGate(t, now())).map(todoistCandidateToTask), error: null };
+    } catch (err) {
+      return { candidates: [], error: `Todoist: ${err?.message ?? 'connector error'}` };
+    }
   }
 
   // Fetches, hashes, and classifies a set of Slack threads (keyed by
@@ -171,12 +193,16 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
     }
 
     const fetched = await mapWithConcurrency([...refsByKey.entries()], CONCURRENCY, async ([key, ref]) => {
-      const threadResult = await callMcpTool(toolNames.slackReadThread, {
-        channel_id: ref.channelId, message_ts: ref.threadTs,
-      });
-      const rawText = unwrapMcpResult(threadResult);
-      if (typeof rawText !== 'string') return null;
-      return { key, ref, rawText, hash: djb2Hash(normalizeSlackThread(rawText)) };
+      try {
+        const threadResult = await callMcpTool(toolNames.slackReadThread, {
+          channel_id: ref.channelId, message_ts: ref.threadTs,
+        });
+        const rawText = unwrapMcpResult(threadResult);
+        if (typeof rawText !== 'string') return null;
+        return { key, ref, rawText, hash: djb2Hash(normalizeSlackThread(rawText)) };
+      } catch {
+        return null; // one thread's fetch failure must not block the rest of the batch
+      }
     });
 
     const watermarks = loadWatermarks(storage);
@@ -252,12 +278,12 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
   async function runSlackTriage({ force = false } = {}) {
     const nowMs = now().getTime();
     if (!force && nowMs - lastSlackTriageAt < REFRESH_DEBOUNCE_MS) {
-      return { skipped: true, scanned: 0, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, unreadCheckAvailable: false };
+      return { skipped: true, scanned: 0, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, unreadCheckAvailable: false, errors: [] };
     }
     lastSlackTriageAt = nowMs;
 
     if (!toolNames.slackReadThread) {
-      return { skipped: false, scanned: 0, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, unreadCheckAvailable: false };
+      return { skipped: false, scanned: 0, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, unreadCheckAvailable: false, errors: [] };
     }
 
     const dismissedKeys = new Set(loadDismissedKeys(storage));
@@ -265,14 +291,21 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
     const trackedByKey = new Map(trackedSlackTasks.map((t) => [sourceRefKey(t), t]));
 
     const refsByKey = new Map();
+    const errors = [];
     if (toolNames.slackSearch) {
       for (const query of buildSlackRecentQueries(now())) {
-        const searchResult = await callMcpTool(toolNames.slackSearch, { query, limit: 20 });
-        const unwrapped = unwrapMcpResult(searchResult);
-        const searchText = typeof unwrapped === 'string' ? unwrapped : (unwrapped?.results ?? '');
-        for (const ref of extractSlackThreadRefs(searchText)) {
-          const key = sourceRefKey({ source: 'slack', sourceRef: ref });
-          if (!refsByKey.has(key)) refsByKey.set(key, ref);
+        try {
+          const searchResult = await callMcpTool(toolNames.slackSearch, { query, limit: 20 });
+          const unwrapped = unwrapMcpResult(searchResult);
+          const searchText = typeof unwrapped === 'string' ? unwrapped : (unwrapped?.results ?? '');
+          for (const ref of extractSlackThreadRefs(searchText)) {
+            const key = sourceRefKey({ source: 'slack', sourceRef: ref });
+            if (!refsByKey.has(key)) refsByKey.set(key, ref);
+          }
+        } catch (err) {
+          // One query failing must not block the other query or the
+          // already-tracked-threads fallback below.
+          errors.push(`Slack search ("${query}"): ${err?.message ?? 'connector error'}`);
         }
       }
     }
@@ -293,7 +326,7 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
       saveTasks(mergeSeedTasks(existing, newTasks, [...dismissedKeys]), storage);
     }
 
-    return { skipped: false, ...summary, unreadCheckAvailable: false };
+    return { skipped: false, ...summary, unreadCheckAvailable: false, errors };
   }
 
   // Coded against the live-verified ccd_session_mgmt shape only:
@@ -308,7 +341,12 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
   async function discoverClaudeSessionCandidates(blockedKeys, watermarks) {
     if (!toolNames.sessionList) return { candidates: [], error: null };
 
-    const result = await callMcpTool(toolNames.sessionList, { limit: 25 });
+    let result;
+    try {
+      result = await callMcpTool(toolNames.sessionList, { limit: 25 });
+    } catch (err) {
+      return { candidates: [], error: `Claude sessions: ${err?.message ?? 'connector error'}` };
+    }
     const sessions = unwrapMcpResult(result);
     const list = Array.isArray(sessions) ? sessions : (Array.isArray(sessions?.sessions) ? sessions.sessions : null);
 
@@ -327,18 +365,22 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
     });
 
     const classified = await mapWithConcurrency(candidates, CONCURRENCY, async (session) => {
-      const key = sourceRefKey({ source: 'claude_session', sourceRef: { sessionId: session.sessionId } });
-      const eventsResult = await callMcpTool(toolNames.sessionEvents, {
-        session_id: session.sessionId, limit: SESSION_TAIL_MESSAGES,
-      });
-      const tail = unwrapMcpResult(eventsResult);
+      try {
+        const key = sourceRefKey({ source: 'claude_session', sourceRef: { sessionId: session.sessionId } });
+        const eventsResult = await callMcpTool(toolNames.sessionEvents, {
+          session_id: session.sessionId, limit: SESSION_TAIL_MESSAGES,
+        });
+        const tail = unwrapMcpResult(eventsResult);
 
-      setWatermark(key, changeSignalFor('claude_session', session), storage);
-      if (typeof tail !== 'string' || !tail.trim()) return null;
+        setWatermark(key, changeSignalFor('claude_session', session), storage);
+        if (typeof tail !== 'string' || !tail.trim()) return null;
 
-      const judgment = parseSessionJudgment(await askClaude(buildSessionJudgmentPrompt(session, tail), []));
-      if (!judgment?.needsAttention) return null;
-      return claudeSessionCandidateToTask(session, judgment);
+        const judgment = parseSessionJudgment(await askClaude(buildSessionJudgmentPrompt(session, tail), []));
+        if (!judgment?.needsAttention) return null;
+        return claudeSessionCandidateToTask(session, judgment);
+      } catch {
+        return null; // one session's failure must not block the rest of the batch
+      }
     });
 
     return { candidates: classified.filter(Boolean), error: null };
@@ -357,14 +399,14 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
     // being fetched again, let alone re-judged by an LLM.
     const blockedKeys = new Set([...getTasks().map(sourceRefKey), ...dismissedKeys]);
 
-    const [linearCandidates, todoistCandidates, sessionResult] = await Promise.all([
+    const [linearResult, todoistResult, sessionResult] = await Promise.all([
       discoverLinearCandidates(),
       discoverTodoistCandidates(),
       discoverClaudeSessionCandidates(blockedKeys, watermarks),
     ]);
 
     const candidateTasks = [
-      ...linearCandidates, ...todoistCandidates, ...sessionResult.candidates,
+      ...linearResult.candidates, ...todoistResult.candidates, ...sessionResult.candidates,
     ].map((c) => blankTask({
       title: c.title, source: c.source, sourceRef: c.sourceRef,
       ballInUsersCourt: c.ballInUsersCourt ?? false, now: now(),
@@ -375,7 +417,13 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
     const existing = getTasks();
     const merged = mergeSeedTasks(existing, candidateTasks, dismissedKeys);
     saveTasks(merged, storage);
-    return { added: merged.length - existing.length, sessionDiscoveryError: sessionResult.error };
+
+    const errors = [
+      ...linearResult.errors,
+      ...(todoistResult.error ? [todoistResult.error] : []),
+      ...(sessionResult.error ? [sessionResult.error] : []),
+    ];
+    return { added: merged.length - existing.length, errors };
   }
 
   function addManualTask(title) {

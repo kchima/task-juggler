@@ -13,12 +13,15 @@
     MOCK_CCD_SESSION, MOCK_CCD_SESSION_TAIL,
   } from './mock-fixtures.js';
 
-  const state = { slackVersion: 1 };
+  const state = { slackVersion: 1, breakLinearGlobex: false };
   window.__JUGGLER_TOOL_NAMES__ = MOCK_TOOL_NAMES;
 
   window.cowork = {
     async callMcpTool(name, args) {
       console.log('[mock callMcpTool]', name, args);
+      if (name === `${MOCK_TOOL_NAMES.linearWorkspaces.Globex}list_issues` && state.breakLinearGlobex) {
+        throw new Error('connector invalidated, needs reconnect');
+      }
       if (name === MOCK_TOOL_NAMES.slackReadThread) {
         if (args.channel_id === MOCK_SLACK_DISCOVERY_THREAD.channelId) {
           return { content: [{ text: MOCK_SLACK_DISCOVERY_THREAD.rawText }], isError: false };
@@ -86,6 +89,12 @@
   // flip the Slack fixture to its "changed" version, to exercise the cache-miss
   // path live.
   window.__jugglerFlipSlackFixture = () => { state.slackVersion = 2; };
+
+  // Simulates a connector going into an "invalidated, needs reconnect" state
+  // (a real failure mode found via a live MCP probe) — exercises the
+  // resilience path and the errors dropdown without touching the other
+  // sources.
+  window.__jugglerBreakLinearGlobex = () => { state.breakLinearGlobex = true; };
 
   window.__jugglerErrors = [];
   window.addEventListener('error', (e) => {
