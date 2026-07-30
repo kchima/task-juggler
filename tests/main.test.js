@@ -14,7 +14,9 @@ function domFixture() {
     <button id="jg-add-btn"></button>
     <button id="jg-view-toggle"></button>
     <button id="jg-refresh-btn"></button>
+    <button id="jg-probe-btn"></button>
     <span id="jg-status"></span>
+    <details id="jg-probe" hidden><summary></summary><ul></ul></details>
     <div id="jg-list"></div>
     <div id="jg-card" hidden></div>
   `;
@@ -29,6 +31,7 @@ function fakeApp(overrides = {}) {
     runSlackTriage: vi.fn().mockResolvedValue({
       skipped: false, scanned: 0, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false,
     }),
+    probeSessionTools: vi.fn().mockResolvedValue([]),
     addManualTask: vi.fn(),
     addByLink: vi.fn(),
     cycleStatusManual: vi.fn(),
@@ -200,6 +203,49 @@ describe('mountApp', () => {
     const linearGroup = candidatesEl.querySelector('[data-group="linear"]');
     expect(linearGroup.querySelector('summary').textContent).toContain('Linear (0)');
     expect(linearGroup.querySelector('li').textContent).toBe('none this scan');
+  });
+
+  it('clicking Probe calls probeSessionTools and opens the panel with the raw result', async () => {
+    const app = fakeApp({
+      probeSessionTools: vi.fn().mockResolvedValue([
+        { name: 'mcp__session_info__list_sessions', reachable: false, error: 'No such tool available', shape: null },
+        { name: 'mcp__ccd_session_mgmt__list_sessions', reachable: true, error: null, shape: {
+          isError: false, hasStructuredContent: true, contentTextType: 'undefined',
+          unwrappedType: 'array', unwrappedKeys: null, stringValuedKeys: null, rawJson: '[]',
+        } },
+      ]),
+    });
+    mountApp(document, app);
+    document.getElementById('jg-probe-btn').click();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(app.probeSessionTools).toHaveBeenCalledTimes(1);
+    const probeEl = document.getElementById('jg-probe');
+    expect(probeEl.hidden).toBe(false);
+    expect(probeEl.open).toBe(true); // opened for the user, since they explicitly asked for it
+    expect(probeEl.textContent).toContain('No such tool available');
+    expect(document.getElementById('jg-status').textContent).toContain('1 reachable');
+  });
+
+  it('the auto-refresh tick never probes — probing deliberately calls tools that may not exist', () => {
+    vi.useFakeTimers();
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    const app = fakeApp();
+    mountApp(document, app, { autoRefreshMs: 1000 });
+    vi.advanceTimersByTime(5000);
+    expect(app.probeSessionTools).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it('in offline mode, Probe says so instead of calling a nonexistent bridge', async () => {
+    const app = fakeApp();
+    mountApp(document, app, { offline: true });
+    document.getElementById('jg-probe-btn').click();
+    await Promise.resolve();
+    expect(app.probeSessionTools).not.toHaveBeenCalled();
+    expect(document.getElementById('jg-status').textContent).toContain('no connectors to probe');
   });
 
   it('in offline mode, refresh does not call the app and says so instead of throwing', async () => {

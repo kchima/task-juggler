@@ -42,6 +42,19 @@
   #jg-candidates ul { margin: 4px 0 0; padding-left: 18px; }
   #jg-candidates li { margin-bottom: 2px; }
   #jg-candidates li.jg-candidate-empty { opacity: 0.6; font-style: italic; }
+  #jg-probe { font-size: 12px; margin-bottom: 10px; }
+  #jg-probe > summary { cursor: pointer; user-select: none; }
+  #jg-probe ul { margin: 6px 0 0; padding-left: 18px; }
+  #jg-probe li { margin-bottom: 10px; }
+  .jg-probe-name { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  /* pre-wrap, not the default pre: the literal indentation and line breaks
+     of a prose-formatted response ARE the thing being inspected here, but it
+     still has to wrap rather than force the page to scroll sideways. */
+  .jg-probe-sublabel { margin-top: 6px; opacity: 0.7; font-size: 11px; }
+  .jg-probe-literal { border-left: 3px solid rgba(128,128,128,0.5); }
+  .jg-probe-body { white-space: pre-wrap; word-break: break-word; margin: 4px 0 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+    background: rgba(128,128,128,0.12); padding: 8px; border-radius: 6px; max-height: 340px; overflow: auto; }
 </style>
 </head>
 <body>
@@ -61,8 +74,13 @@
   <button id="jg-add-btn">Add</button>
   <button id="jg-view-toggle">Toggle view</button>
   <button id="jg-refresh-btn">Refresh</button>
+  <button id="jg-probe-btn" title="Call session-listing tools and show exactly what they return">Probe</button>
   <span id="jg-status"></span>
 </header>
+<details id="jg-probe" hidden>
+  <summary></summary>
+  <ul></ul>
+</details>
 <div id="jg-list"></div>
 <div id="jg-card" hidden></div>
 <script id="juggler-seed" type="application/json"></script>

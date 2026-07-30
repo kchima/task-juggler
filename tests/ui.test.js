@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { nextStatus, renderList, renderCard, renderErrors, renderCandidates } from '../src/ui.js';
+import { nextStatus, renderList, renderCard, renderErrors, renderCandidates, renderProbe } from '../src/ui.js';
 
 function noopHandlers() {
   return {
@@ -117,6 +117,72 @@ describe('renderCandidates', () => {
     const slackGroup = container.querySelector('[data-group="slack"]');
     expect(slackGroup.querySelectorAll('li')).toHaveLength(1);
     expect(slackGroup.querySelector('li').textContent).toBe('none this scan');
+  });
+});
+
+describe('renderProbe', () => {
+  function probeFixture() {
+    document.body.innerHTML = '<details id="jg-probe" hidden><summary></summary><ul></ul></details>';
+    return document.getElementById('jg-probe');
+  }
+
+  const PROSE = 'Sessions (3 of 195, most recent first)\n - abc123 "Fix the thing" (idle, cwd: /Users/x/dev, is_child: false)\n';
+
+  it('stays hidden until a probe has actually run', () => {
+    const container = probeFixture();
+    renderProbe(container, []);
+    expect(container.hidden).toBe(true);
+  });
+
+  it('renders the prose payload with its real line breaks so the literal format can be read off the screen', () => {
+    const container = probeFixture();
+    renderProbe(container, [{
+      name: 'mcp__session_info__list_sessions', reachable: true, error: null,
+      shape: {
+        isError: false, hasStructuredContent: false, contentTextType: 'string',
+        unwrappedType: 'string', unwrappedKeys: null, stringValuedKeys: null,
+        payloadPreviews: [{ key: '(whole response)', text: PROSE }],
+        rawJson: JSON.stringify({ content: [{ text: PROSE }] }, null, 2),
+      },
+    }]);
+    const literal = container.querySelector('.jg-probe-literal');
+    expect(literal.tagName).toBe('PRE');
+    // The exact line format is recoverable verbatim — the whole point.
+    expect(literal.textContent).toContain(' - abc123 "Fix the thing" (idle, cwd: /Users/x/dev, is_child: false)');
+    expect(literal.textContent).toContain('\n'); // real newline, not an escape
+    // The escaped JSON dump is still available alongside it.
+    expect(container.textContent).toContain('raw response (JSON-escaped):');
+  });
+
+  it('shows an unreachable tool as unreachable with its reason, not as a silent omission', () => {
+    const container = probeFixture();
+    renderProbe(container, [
+      { name: 'mcp__session_info__list_sessions', reachable: false, error: 'No such tool available', shape: null },
+      { name: 'mcp__ccd_session_mgmt__list_sessions', reachable: true, error: null, shape: {
+        isError: false, hasStructuredContent: true, contentTextType: 'undefined',
+        unwrappedType: 'array', unwrappedKeys: null, stringValuedKeys: null, rawJson: '[]',
+      } },
+    ]);
+    expect(container.hidden).toBe(false);
+    expect(container.querySelector('summary').textContent).toContain('1/2 reachable');
+    const bodies = [...container.querySelectorAll('.jg-probe-body')].map((el) => el.textContent);
+    expect(bodies[0]).toContain('not reachable from this artifact: No such tool available');
+    expect(bodies[1]).toContain('unwrapped type: array');
+  });
+
+  it('surfaces the envelope keys prominently, since that is the answer being hunted', () => {
+    const container = probeFixture();
+    renderProbe(container, [{
+      name: 'mcp__x__list_sessions', reachable: true, error: null,
+      shape: {
+        isError: false, hasStructuredContent: false, contentTextType: 'string',
+        unwrappedType: 'object', unwrappedKeys: ['sessions', 'pagination_info'],
+        stringValuedKeys: ['sessions'], rawJson: '{}',
+      },
+    }]);
+    const body = container.querySelector('.jg-probe-body').textContent;
+    expect(body).toContain('envelope keys:  ["sessions","pagination_info"]');
+    expect(body).toContain('string-valued:  ["sessions"]');
   });
 });
 

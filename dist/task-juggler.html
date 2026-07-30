@@ -42,6 +42,19 @@
   #jg-candidates ul { margin: 4px 0 0; padding-left: 18px; }
   #jg-candidates li { margin-bottom: 2px; }
   #jg-candidates li.jg-candidate-empty { opacity: 0.6; font-style: italic; }
+  #jg-probe { font-size: 12px; margin-bottom: 10px; }
+  #jg-probe > summary { cursor: pointer; user-select: none; }
+  #jg-probe ul { margin: 6px 0 0; padding-left: 18px; }
+  #jg-probe li { margin-bottom: 10px; }
+  .jg-probe-name { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  /* pre-wrap, not the default pre: the literal indentation and line breaks
+     of a prose-formatted response ARE the thing being inspected here, but it
+     still has to wrap rather than force the page to scroll sideways. */
+  .jg-probe-sublabel { margin-top: 6px; opacity: 0.7; font-size: 11px; }
+  .jg-probe-literal { border-left: 3px solid rgba(128,128,128,0.5); }
+  .jg-probe-body { white-space: pre-wrap; word-break: break-word; margin: 4px 0 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+    background: rgba(128,128,128,0.12); padding: 8px; border-radius: 6px; max-height: 340px; overflow: auto; }
 </style>
 </head>
 <body>
@@ -61,8 +74,13 @@
   <button id="jg-add-btn">Add</button>
   <button id="jg-view-toggle">Toggle view</button>
   <button id="jg-refresh-btn">Refresh</button>
+  <button id="jg-probe-btn" title="Call session-listing tools and show exactly what they return">Probe</button>
   <span id="jg-status"></span>
 </header>
+<details id="jg-probe" hidden>
+  <summary></summary>
+  <ul></ul>
+</details>
 <div id="jg-list"></div>
 <div id="jg-card" hidden></div>
 <script id="juggler-seed" type="application/json"></script>
@@ -639,6 +657,73 @@ function slackThreadText(unwrapped) {
   return typeof messages === 'string' ? messages : null;
 }
 
+// --- Connector shape probe ------------------------------------------------
+// Twice now, code has been written against a *description* of an MCP
+// response instead of the response itself, and been subtly wrong both times
+// (the Slack `{messages, pagination_info}` envelope being the expensive
+// one). This reports what a tool ACTUALLY returned, from inside whatever
+// sandbox the artifact is running in — which is also the only place that can
+// answer whether a tool is reachable from an artifact at all, since the
+// host's callMcpTool bridge may expose a narrower allowlist than chat does.
+//
+// Deliberately reports the raw envelope AND what unwrapMcpResult makes of
+// it, because the gap between those two is exactly where the bugs live.
+const PROBE_PREVIEW_LIMIT = 4000;
+
+function summarizeMcpShape(raw) {
+  const unwrapped = unwrapMcpResult(raw);
+  const unwrappedType = unwrapped === null ? 'null' : Array.isArray(unwrapped) ? 'array' : typeof unwrapped;
+  return {
+    isError: Boolean(raw?.isError),
+    hasStructuredContent: raw?.structuredContent !== undefined,
+    contentTextType: typeof raw?.content?.[0]?.text,
+    unwrappedType,
+    // The envelope question, answered directly: if this is an object, these
+    // keys are the candidates for where the real payload lives.
+    unwrappedKeys: unwrappedType === 'object' ? Object.keys(unwrapped) : null,
+    stringValuedKeys: unwrappedType === 'object'
+      ? Object.entries(unwrapped).filter(([, v]) => typeof v === 'string').map(([k]) => k)
+      : null,
+    // The raw dump is JSON, so a prose payload comes out escaped onto one
+    // line ("...\n - id \"title\"..."), which is unreadable for exactly the
+    // case this tool exists to inspect. These are the same strings with
+    // their real line breaks, so the literal format can actually be read.
+    payloadPreviews: stringPayloads(unwrapped),
+    rawJson: safeStringify(raw).slice(0, PROBE_PREVIEW_LIMIT),
+  };
+}
+
+function stringPayloads(unwrapped) {
+  if (typeof unwrapped === 'string') {
+    return [{ key: '(whole response)', text: unwrapped.slice(0, PROBE_PREVIEW_LIMIT) }];
+  }
+  if (unwrapped && typeof unwrapped === 'object' && !Array.isArray(unwrapped)) {
+    return Object.entries(unwrapped)
+      .filter(([, v]) => typeof v === 'string')
+      .map(([key, v]) => ({ key, text: v.slice(0, PROBE_PREVIEW_LIMIT) }));
+  }
+  return [];
+}
+
+function safeStringify(value) {
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+// Calls one tool and reports what came back, never throwing — a name that
+// isn't reachable is itself a result worth seeing, not an error to swallow.
+async function probeTool(callMcpTool, name, args) {
+  try {
+    const raw = await callMcpTool(name, args);
+    return { name, args, reachable: true, error: null, shape: summarizeMcpShape(raw) };
+  } catch (err) {
+    return { name, args, reachable: false, error: err?.message ?? 'call failed', shape: null };
+  }
+}
+
 function findWorkspacePrefix(linearWorkspaces, workspaceLabel) {
   const target = workspaceLabel.toLowerCase();
   const match = Object.entries(linearWorkspaces ?? {}).find(([label]) => label.toLowerCase() === target);
@@ -750,6 +835,73 @@ function renderCandidateGroup(groupEl, label, items) {
   for (const item of items) {
     const li = document.createElement('li');
     li.textContent = `[${item.outcome}] ${item.label}`;
+    list.appendChild(li);
+  }
+}
+
+// Renders raw connector-probe output. Everything here is deliberately
+// verbatim and in a <pre>: the whole point is to read the LITERAL response
+// (exact indentation, quoting, line breaks), because a paraphrase of a
+// response shape is what caused the bugs this exists to prevent. Normal HTML
+// rendering would collapse exactly the whitespace we're trying to inspect.
+function renderProbe(container, reports) {
+  const list = container.querySelector('ul');
+  list.innerHTML = '';
+  if (!reports.length) {
+    container.hidden = true;
+    return;
+  }
+  container.hidden = false;
+  const reachable = reports.filter((r) => r.reachable).length;
+  container.querySelector('summary').textContent = `Connector probe — ${reachable}/${reports.length} reachable`;
+
+  for (const report of reports) {
+    const li = document.createElement('li');
+
+    const heading = document.createElement('div');
+    heading.className = 'jg-probe-name';
+    heading.textContent = `${report.reachable ? '✓' : '✗'} ${report.name}`;
+    li.appendChild(heading);
+
+    const body = document.createElement('pre');
+    body.className = 'jg-probe-body';
+    body.textContent = report.reachable
+      ? [
+        `unwrapped type: ${report.shape.unwrappedType}`,
+        `envelope keys:  ${report.shape.unwrappedKeys ? JSON.stringify(report.shape.unwrappedKeys) : '(not an object)'}`,
+        `string-valued:  ${report.shape.stringValuedKeys ? JSON.stringify(report.shape.stringValuedKeys) : '(n/a)'}`,
+        `isError: ${report.shape.isError}  structuredContent: ${report.shape.hasStructuredContent}  content[0].text: ${report.shape.contentTextType}`,
+      ].join('\n')
+      : `not reachable from this artifact: ${report.error}`;
+    li.appendChild(body);
+
+    // Each string payload verbatim, with real line breaks — this is the
+    // block to read when the response is prose, since the JSON dump below
+    // escapes exactly the newlines and quoting being inspected.
+    for (const payload of report.shape?.payloadPreviews ?? []) {
+      const label = document.createElement('div');
+      label.className = 'jg-probe-sublabel';
+      label.textContent = `literal payload — ${payload.key}:`;
+      li.appendChild(label);
+
+      const pre = document.createElement('pre');
+      pre.className = 'jg-probe-body jg-probe-literal';
+      pre.textContent = payload.text;
+      li.appendChild(pre);
+    }
+
+    if (report.reachable) {
+      const label = document.createElement('div');
+      label.className = 'jg-probe-sublabel';
+      label.textContent = 'raw response (JSON-escaped):';
+      li.appendChild(label);
+
+      const pre = document.createElement('pre');
+      pre.className = 'jg-probe-body';
+      pre.textContent = report.shape.rawJson;
+      li.appendChild(pre);
+    }
+
     list.appendChild(li);
   }
 }
@@ -1288,6 +1440,33 @@ function createApp({ storage, callMcpTool, askClaude, toolNames, now = () => new
     return { skipped: false, ...summary, detected: [...configNotes, ...detected], unreadCheckAvailable: false, errors };
   }
 
+  // Session-listing tools seen in the wild, tried in order. Claude Code
+  // exposes ccd_session_mgmt (verified: a real array of
+  // {sessionId,title,cwd,isArchived,isRunning,lastActivityAt}); Cowork has
+  // been reported to expose session_info with a prose response instead.
+  // Extra names can be added via toolNames.sessionProbeNames without a
+  // rebuild, since a probe whose candidate list is hardcoded goes stale the
+  // moment a host renames something.
+  const KNOWN_SESSION_TOOL_NAMES = [
+    'mcp__session_info__list_sessions',
+    'mcp__ccd_session_mgmt__list_sessions',
+  ];
+
+  // Runs on demand (never on the auto-refresh tick — it deliberately calls
+  // tools that may not exist). Answers the two questions no amount of
+  // describing a response can: is this tool reachable from inside the
+  // artifact's sandbox at all, and what does it *literally* return here.
+  async function probeSessionTools() {
+    const names = [...new Set([
+      ...(toolNames.sessionList ? [toolNames.sessionList] : []),
+      ...(toolNames.sessionProbeNames ?? []),
+      ...KNOWN_SESSION_TOOL_NAMES,
+    ])];
+    // Small limit: this is a shape probe, not a data pull, and a 195-session
+    // dump would bury the structure we're trying to read.
+    return Promise.all(names.map((name) => probeTool(callMcpTool, name, { limit: 3 })));
+  }
+
   // Coded against the live-verified ccd_session_mgmt shape only:
   // { sessionId, title, cwd, isArchived, isRunning, lastActivityAt } arrays.
   // Cowork has been observed exposing a *different* server (session_info)
@@ -1295,8 +1474,8 @@ function createApp({ storage, callMcpTool, askClaude, toolNames, now = () => new
   // supported here. Rather than silently returning zero candidates against
   // an unrecognized shape (indistinguishable from "nothing to report"),
   // this surfaces the mismatch as an explicit error so it doesn't masquerade
-  // as "no in-flight sessions." Wiring up session_info itself needs a fresh
-  // probe from within Cowork first — see the plugin skill notes.
+  // as "no in-flight sessions." Wiring up session_info itself needs a real
+  // probe from inside the artifact — that's what probeSessionTools is for.
   async function discoverClaudeSessionCandidates(blockedKeys, watermarks) {
     // An unset tool name is the single most likely reason this source shows
     // zero, and a bare "0" is indistinguishable from "looked, found nothing."
@@ -1455,7 +1634,7 @@ function createApp({ storage, callMcpTool, askClaude, toolNames, now = () => new
   }
 
   return {
-    getTasks, refreshAll, refreshOne, discoverNewTasks, runSlackTriage,
+    getTasks, refreshAll, refreshOne, discoverNewTasks, runSlackTriage, probeSessionTools,
     addManualTask, addByLink, cycleStatusManual, reopen, remove, undismissAll,
   };
 }
@@ -1581,6 +1760,27 @@ function mountApp(doc, app, options = {}) {
   }
 
   doc.getElementById('jg-refresh-btn').addEventListener('click', () => runRefreshAndDiscover('Refresh'));
+
+  // On-demand only, never on the auto-refresh tick: this deliberately calls
+  // tool names that may not exist, and "it threw" is a meaningful result
+  // here rather than a failure — so it reports rather than surfacing errors.
+  doc.getElementById('jg-probe-btn').addEventListener('click', async () => {
+    const statusEl = doc.getElementById('jg-status');
+    if (offline) {
+      statusEl.textContent = 'Local mode — no connectors to probe';
+      return;
+    }
+    statusEl.textContent = 'Probing connectors…';
+    try {
+      const reports = await app.probeSessionTools();
+      renderProbe(doc.getElementById('jg-probe'), reports);
+      doc.getElementById('jg-probe').open = true;
+      const reachable = reports.filter((r) => r.reachable).length;
+      statusEl.textContent = `Probed ${reports.length} tool name${reports.length === 1 ? '' : 's'}, ${reachable} reachable`;
+    } catch (err) {
+      statusEl.textContent = `Probe failed: ${err?.message ?? 'unknown error'}`;
+    }
+  });
 
   doc.getElementById('jg-view-toggle').addEventListener('click', () => {
     viewMode = viewMode === 'list' ? 'card' : 'list';

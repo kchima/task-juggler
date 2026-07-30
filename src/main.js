@@ -1,5 +1,5 @@
 import { createApp } from './app.js';
-import { renderList, renderCard, nextStatus, renderErrors, renderCandidates } from './ui.js';
+import { renderList, renderCard, nextStatus, renderErrors, renderCandidates, renderProbe } from './ui.js';
 import { mergeSeedTasks, readSeedFromDocument } from './seedMerge.js';
 import { loadTasks, saveTasks } from './storage.js';
 import { sortTasks } from './scoring.js';
@@ -117,6 +117,27 @@ export function mountApp(doc, app, options = {}) {
   }
 
   doc.getElementById('jg-refresh-btn').addEventListener('click', () => runRefreshAndDiscover('Refresh'));
+
+  // On-demand only, never on the auto-refresh tick: this deliberately calls
+  // tool names that may not exist, and "it threw" is a meaningful result
+  // here rather than a failure — so it reports rather than surfacing errors.
+  doc.getElementById('jg-probe-btn').addEventListener('click', async () => {
+    const statusEl = doc.getElementById('jg-status');
+    if (offline) {
+      statusEl.textContent = 'Local mode — no connectors to probe';
+      return;
+    }
+    statusEl.textContent = 'Probing connectors…';
+    try {
+      const reports = await app.probeSessionTools();
+      renderProbe(doc.getElementById('jg-probe'), reports);
+      doc.getElementById('jg-probe').open = true;
+      const reachable = reports.filter((r) => r.reachable).length;
+      statusEl.textContent = `Probed ${reports.length} tool name${reports.length === 1 ? '' : 's'}, ${reachable} reachable`;
+    } catch (err) {
+      statusEl.textContent = `Probe failed: ${err?.message ?? 'unknown error'}`;
+    }
+  });
 
   doc.getElementById('jg-view-toggle').addEventListener('click', () => {
     viewMode = viewMode === 'list' ? 'card' : 'list';

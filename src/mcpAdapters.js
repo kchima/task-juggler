@@ -24,6 +24,73 @@ export function slackThreadText(unwrapped) {
   return typeof messages === 'string' ? messages : null;
 }
 
+// --- Connector shape probe ------------------------------------------------
+// Twice now, code has been written against a *description* of an MCP
+// response instead of the response itself, and been subtly wrong both times
+// (the Slack `{messages, pagination_info}` envelope being the expensive
+// one). This reports what a tool ACTUALLY returned, from inside whatever
+// sandbox the artifact is running in — which is also the only place that can
+// answer whether a tool is reachable from an artifact at all, since the
+// host's callMcpTool bridge may expose a narrower allowlist than chat does.
+//
+// Deliberately reports the raw envelope AND what unwrapMcpResult makes of
+// it, because the gap between those two is exactly where the bugs live.
+const PROBE_PREVIEW_LIMIT = 4000;
+
+export function summarizeMcpShape(raw) {
+  const unwrapped = unwrapMcpResult(raw);
+  const unwrappedType = unwrapped === null ? 'null' : Array.isArray(unwrapped) ? 'array' : typeof unwrapped;
+  return {
+    isError: Boolean(raw?.isError),
+    hasStructuredContent: raw?.structuredContent !== undefined,
+    contentTextType: typeof raw?.content?.[0]?.text,
+    unwrappedType,
+    // The envelope question, answered directly: if this is an object, these
+    // keys are the candidates for where the real payload lives.
+    unwrappedKeys: unwrappedType === 'object' ? Object.keys(unwrapped) : null,
+    stringValuedKeys: unwrappedType === 'object'
+      ? Object.entries(unwrapped).filter(([, v]) => typeof v === 'string').map(([k]) => k)
+      : null,
+    // The raw dump is JSON, so a prose payload comes out escaped onto one
+    // line ("...\n - id \"title\"..."), which is unreadable for exactly the
+    // case this tool exists to inspect. These are the same strings with
+    // their real line breaks, so the literal format can actually be read.
+    payloadPreviews: stringPayloads(unwrapped),
+    rawJson: safeStringify(raw).slice(0, PROBE_PREVIEW_LIMIT),
+  };
+}
+
+function stringPayloads(unwrapped) {
+  if (typeof unwrapped === 'string') {
+    return [{ key: '(whole response)', text: unwrapped.slice(0, PROBE_PREVIEW_LIMIT) }];
+  }
+  if (unwrapped && typeof unwrapped === 'object' && !Array.isArray(unwrapped)) {
+    return Object.entries(unwrapped)
+      .filter(([, v]) => typeof v === 'string')
+      .map(([key, v]) => ({ key, text: v.slice(0, PROBE_PREVIEW_LIMIT) }));
+  }
+  return [];
+}
+
+function safeStringify(value) {
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+// Calls one tool and reports what came back, never throwing — a name that
+// isn't reachable is itself a result worth seeing, not an error to swallow.
+export async function probeTool(callMcpTool, name, args) {
+  try {
+    const raw = await callMcpTool(name, args);
+    return { name, args, reachable: true, error: null, shape: summarizeMcpShape(raw) };
+  } catch (err) {
+    return { name, args, reachable: false, error: err?.message ?? 'call failed', shape: null };
+  }
+}
+
 function findWorkspacePrefix(linearWorkspaces, workspaceLabel) {
   const target = workspaceLabel.toLowerCase();
   const match = Object.entries(linearWorkspaces ?? {}).find(([label]) => label.toLowerCase() === target);

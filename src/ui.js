@@ -63,6 +63,73 @@ function renderCandidateGroup(groupEl, label, items) {
   }
 }
 
+// Renders raw connector-probe output. Everything here is deliberately
+// verbatim and in a <pre>: the whole point is to read the LITERAL response
+// (exact indentation, quoting, line breaks), because a paraphrase of a
+// response shape is what caused the bugs this exists to prevent. Normal HTML
+// rendering would collapse exactly the whitespace we're trying to inspect.
+export function renderProbe(container, reports) {
+  const list = container.querySelector('ul');
+  list.innerHTML = '';
+  if (!reports.length) {
+    container.hidden = true;
+    return;
+  }
+  container.hidden = false;
+  const reachable = reports.filter((r) => r.reachable).length;
+  container.querySelector('summary').textContent = `Connector probe — ${reachable}/${reports.length} reachable`;
+
+  for (const report of reports) {
+    const li = document.createElement('li');
+
+    const heading = document.createElement('div');
+    heading.className = 'jg-probe-name';
+    heading.textContent = `${report.reachable ? '✓' : '✗'} ${report.name}`;
+    li.appendChild(heading);
+
+    const body = document.createElement('pre');
+    body.className = 'jg-probe-body';
+    body.textContent = report.reachable
+      ? [
+        `unwrapped type: ${report.shape.unwrappedType}`,
+        `envelope keys:  ${report.shape.unwrappedKeys ? JSON.stringify(report.shape.unwrappedKeys) : '(not an object)'}`,
+        `string-valued:  ${report.shape.stringValuedKeys ? JSON.stringify(report.shape.stringValuedKeys) : '(n/a)'}`,
+        `isError: ${report.shape.isError}  structuredContent: ${report.shape.hasStructuredContent}  content[0].text: ${report.shape.contentTextType}`,
+      ].join('\n')
+      : `not reachable from this artifact: ${report.error}`;
+    li.appendChild(body);
+
+    // Each string payload verbatim, with real line breaks — this is the
+    // block to read when the response is prose, since the JSON dump below
+    // escapes exactly the newlines and quoting being inspected.
+    for (const payload of report.shape?.payloadPreviews ?? []) {
+      const label = document.createElement('div');
+      label.className = 'jg-probe-sublabel';
+      label.textContent = `literal payload — ${payload.key}:`;
+      li.appendChild(label);
+
+      const pre = document.createElement('pre');
+      pre.className = 'jg-probe-body jg-probe-literal';
+      pre.textContent = payload.text;
+      li.appendChild(pre);
+    }
+
+    if (report.reachable) {
+      const label = document.createElement('div');
+      label.className = 'jg-probe-sublabel';
+      label.textContent = 'raw response (JSON-escaped):';
+      li.appendChild(label);
+
+      const pre = document.createElement('pre');
+      pre.className = 'jg-probe-body';
+      pre.textContent = report.shape.rawJson;
+      li.appendChild(pre);
+    }
+
+    list.appendChild(li);
+  }
+}
+
 export function nextStatus(status) {
   const idx = STATUS_CYCLE.indexOf(status);
   return STATUS_CYCLE[(idx + 1) % STATUS_CYCLE.length];

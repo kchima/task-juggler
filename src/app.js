@@ -2,7 +2,7 @@ import {
   loadTasks, saveTasks, patchTask, addTask, deleteTask,
   loadDismissedKeys, addDismissedKey, clearDismissedKeys, loadWatermarks, setWatermark,
 } from './storage.js';
-import { fetchRawContext, unwrapMcpResult, slackThreadText } from './mcpAdapters.js';
+import { fetchRawContext, unwrapMcpResult, slackThreadText, probeTool } from './mcpAdapters.js';
 import { normalizeLinearIssue, normalizeSlackThread } from './normalize.js';
 import { djb2Hash } from './hash.js';
 import { refreshTaskViaAi } from './aiClient.js';
@@ -400,6 +400,33 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
     return { skipped: false, ...summary, detected: [...configNotes, ...detected], unreadCheckAvailable: false, errors };
   }
 
+  // Session-listing tools seen in the wild, tried in order. Claude Code
+  // exposes ccd_session_mgmt (verified: a real array of
+  // {sessionId,title,cwd,isArchived,isRunning,lastActivityAt}); Cowork has
+  // been reported to expose session_info with a prose response instead.
+  // Extra names can be added via toolNames.sessionProbeNames without a
+  // rebuild, since a probe whose candidate list is hardcoded goes stale the
+  // moment a host renames something.
+  const KNOWN_SESSION_TOOL_NAMES = [
+    'mcp__session_info__list_sessions',
+    'mcp__ccd_session_mgmt__list_sessions',
+  ];
+
+  // Runs on demand (never on the auto-refresh tick — it deliberately calls
+  // tools that may not exist). Answers the two questions no amount of
+  // describing a response can: is this tool reachable from inside the
+  // artifact's sandbox at all, and what does it *literally* return here.
+  async function probeSessionTools() {
+    const names = [...new Set([
+      ...(toolNames.sessionList ? [toolNames.sessionList] : []),
+      ...(toolNames.sessionProbeNames ?? []),
+      ...KNOWN_SESSION_TOOL_NAMES,
+    ])];
+    // Small limit: this is a shape probe, not a data pull, and a 195-session
+    // dump would bury the structure we're trying to read.
+    return Promise.all(names.map((name) => probeTool(callMcpTool, name, { limit: 3 })));
+  }
+
   // Coded against the live-verified ccd_session_mgmt shape only:
   // { sessionId, title, cwd, isArchived, isRunning, lastActivityAt } arrays.
   // Cowork has been observed exposing a *different* server (session_info)
@@ -407,8 +434,8 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
   // supported here. Rather than silently returning zero candidates against
   // an unrecognized shape (indistinguishable from "nothing to report"),
   // this surfaces the mismatch as an explicit error so it doesn't masquerade
-  // as "no in-flight sessions." Wiring up session_info itself needs a fresh
-  // probe from within Cowork first — see the plugin skill notes.
+  // as "no in-flight sessions." Wiring up session_info itself needs a real
+  // probe from inside the artifact — that's what probeSessionTools is for.
   async function discoverClaudeSessionCandidates(blockedKeys, watermarks) {
     // An unset tool name is the single most likely reason this source shows
     // zero, and a bare "0" is indistinguishable from "looked, found nothing."
@@ -567,7 +594,7 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
   }
 
   return {
-    getTasks, refreshAll, refreshOne, discoverNewTasks, runSlackTriage,
+    getTasks, refreshAll, refreshOne, discoverNewTasks, runSlackTriage, probeSessionTools,
     addManualTask, addByLink, cycleStatusManual, reopen, remove, undismissAll,
   };
 }
