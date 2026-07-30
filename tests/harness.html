@@ -59,14 +59,23 @@
       // session_info is present but returns PROSE, while ccd_session_mgmt
       // (what the code is written against) isn't reachable at all. Content is
       // synthetic; the two failure modes are the real ones being hunted.
+      // Reproduces the two DIFFERENT real failures captured from a deployed
+      // Cowork artifact: session_info is allowlisted but 400s on the args we
+      // guessed, while ccd_session_mgmt is refused by the allowlist outright.
       if (name === 'mcp__session_info__list_sessions') {
+        if (Object.keys(args ?? {}).length > 0) {
+          return { content: [{ type: 'text', text: 'Tool call failed: 400 ' }], isError: true };
+        }
         return {
-          content: [{ text: 'Sessions (3 of 195, most recent first — use limit to see more)\n - local_abc123 "Fix the flaky retry logic" (idle, cwd: /Users/dev/workspace, is_child: false)\n - local_def456 "Draft the release notes" (running, cwd: /Users/dev/other, is_child: true)\n' }],
+          content: [{ type: 'text', text: 'Sessions (3 of 195, most recent first — use limit to see more)\n - local_abc123 "Fix the flaky retry logic" (idle, cwd: /Users/dev/workspace, is_child: false)\n - local_def456 "Draft the release notes" (running, cwd: /Users/dev/other, is_child: true)\n' }],
           isError: false,
         };
       }
       if (name === 'mcp__ccd_session_mgmt__list_sessions') {
-        throw new Error('No such tool available');
+        return {
+          content: [{ type: 'text', text: 'Tool "mcp__ccd_session_mgmt__list_sessions" is not in this artifact\'s mcp_tools allowlist.' }],
+          isError: true,
+        };
       }
       return { content: [{ text: '{}' }], isError: true };
     },

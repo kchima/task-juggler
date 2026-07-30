@@ -713,14 +713,38 @@ function safeStringify(value) {
   }
 }
 
-// Calls one tool and reports what came back, never throwing — a name that
-// isn't reachable is itself a result worth seeing, not an error to swallow.
+function mcpErrorText(raw) {
+  const text = raw?.content?.[0]?.text;
+  return typeof text === 'string' && text.trim() ? text : 'unknown tool error';
+}
+
+// An artifact declares an `mcp_tools` allowlist when it's created; a tool
+// outside it is refused before the call is even attempted. That's a
+// *configuration* failure with a specific fix (add the name to the
+// allowlist) and no amount of retrying with different arguments will help,
+// which is why it's worth telling apart from every other error.
+function isAllowlistError(text) {
+  return typeof text === 'string' && /allowlist/i.test(text);
+}
+
+// Calls one tool and reports what came back, never throwing. Three outcomes,
+// deliberately distinct: 'unreachable' (the call itself threw — no bridge, no
+// such tool), 'tool-error' (the call returned, but with isError set — the
+// tool was reached and refused), and 'ok'. Collapsing the middle case into
+// "reachable" is exactly the mistake that made a first version of this report
+// two hard failures as successes.
 async function probeTool(callMcpTool, name, args) {
   try {
     const raw = await callMcpTool(name, args);
-    return { name, args, reachable: true, error: null, shape: summarizeMcpShape(raw) };
+    const shape = summarizeMcpShape(raw);
+    return {
+      name, args,
+      outcome: shape.isError ? 'tool-error' : 'ok',
+      error: shape.isError ? mcpErrorText(raw) : null,
+      shape,
+    };
   } catch (err) {
-    return { name, args, reachable: false, error: err?.message ?? 'call failed', shape: null };
+    return { name, args, outcome: 'unreachable', error: err?.message ?? 'call failed', shape: null };
   }
 }
 
@@ -852,27 +876,34 @@ function renderProbe(container, reports) {
     return;
   }
   container.hidden = false;
-  const reachable = reports.filter((r) => r.reachable).length;
-  container.querySelector('summary').textContent = `Connector probe — ${reachable}/${reports.length} reachable`;
+  const ok = reports.filter((r) => r.outcome === 'ok').length;
+  container.querySelector('summary').textContent = `Connector probe — ${ok}/${reports.length} call${reports.length === 1 ? '' : 's'} succeeded`;
+
+  const ICON = { ok: '✓', 'tool-error': '⚠', unreachable: '✗' };
 
   for (const report of reports) {
     const li = document.createElement('li');
 
     const heading = document.createElement('div');
     heading.className = 'jg-probe-name';
-    heading.textContent = `${report.reachable ? '✓' : '✗'} ${report.name}`;
+    // Args are part of the identity of the attempt: the same name can fail
+    // with one signature and succeed with another, and that difference is
+    // the finding.
+    heading.textContent = `${ICON[report.outcome] ?? '?'} ${report.name}  ${JSON.stringify(report.args)}`;
     li.appendChild(heading);
 
     const body = document.createElement('pre');
     body.className = 'jg-probe-body';
-    body.textContent = report.reachable
+    body.textContent = report.outcome === 'ok'
       ? [
         `unwrapped type: ${report.shape.unwrappedType}`,
         `envelope keys:  ${report.shape.unwrappedKeys ? JSON.stringify(report.shape.unwrappedKeys) : '(not an object)'}`,
         `string-valued:  ${report.shape.stringValuedKeys ? JSON.stringify(report.shape.stringValuedKeys) : '(n/a)'}`,
-        `isError: ${report.shape.isError}  structuredContent: ${report.shape.hasStructuredContent}  content[0].text: ${report.shape.contentTextType}`,
+        `structuredContent: ${report.shape.hasStructuredContent}  content[0].text: ${report.shape.contentTextType}`,
       ].join('\n')
-      : `not reachable from this artifact: ${report.error}`;
+      : report.outcome === 'tool-error'
+        ? `tool was reached but refused the call:\n${report.error}`
+        : `call could not be made at all:\n${report.error}`;
     li.appendChild(body);
 
     // Each string payload verbatim, with real line breaks — this is the
@@ -890,7 +921,10 @@ function renderProbe(container, reports) {
       li.appendChild(pre);
     }
 
-    if (report.reachable) {
+    // Shown for tool-errors too, not just successes — a refusal's raw body
+    // often carries the actual reason (an allowlist name, a validation
+    // message) that the summary line alone would lose.
+    if (report.shape) {
       const label = document.createElement('div');
       label.className = 'jg-probe-sublabel';
       label.textContent = 'raw response (JSON-escaped):';
@@ -1452,19 +1486,37 @@ function createApp({ storage, callMcpTool, askClaude, toolNames, now = () => new
     'mcp__ccd_session_mgmt__list_sessions',
   ];
 
+  // A bare "400" from a tool that IS allowlisted usually means the arguments
+  // are wrong, not that the tool is unusable — so try a few plausible shapes
+  // rather than reporting one failure and stopping. Small limits throughout:
+  // this is a shape probe, not a data pull, and a 195-session dump would bury
+  // the structure being read.
+  const SESSION_PROBE_ARG_VARIANTS = [{ limit: 3 }, {}, { limit: '3' }];
+
   // Runs on demand (never on the auto-refresh tick — it deliberately calls
   // tools that may not exist). Answers the two questions no amount of
-  // describing a response can: is this tool reachable from inside the
-  // artifact's sandbox at all, and what does it *literally* return here.
+  // describing a response can: can this tool be called from inside the
+  // artifact's sandbox, and what does it *literally* return here.
   async function probeSessionTools() {
     const names = [...new Set([
       ...(toolNames.sessionList ? [toolNames.sessionList] : []),
       ...(toolNames.sessionProbeNames ?? []),
       ...KNOWN_SESSION_TOOL_NAMES,
     ])];
-    // Small limit: this is a shape probe, not a data pull, and a 195-session
-    // dump would bury the structure we're trying to read.
-    return Promise.all(names.map((name) => probeTool(callMcpTool, name, { limit: 3 })));
+
+    const reports = [];
+    for (const name of names) {
+      for (const args of SESSION_PROBE_ARG_VARIANTS) {
+        const report = await probeTool(callMcpTool, name, args);
+        reports.push(report);
+        if (report.outcome === 'ok') break; // found a working signature
+        // An allowlist refusal is about the tool, not the arguments — more
+        // variants would just produce identical noise.
+        if (isAllowlistError(report.error)) break;
+        if (report.outcome === 'unreachable') break;
+      }
+    }
+    return reports;
   }
 
   // Coded against the live-verified ccd_session_mgmt shape only:
@@ -1775,8 +1827,8 @@ function mountApp(doc, app, options = {}) {
       const reports = await app.probeSessionTools();
       renderProbe(doc.getElementById('jg-probe'), reports);
       doc.getElementById('jg-probe').open = true;
-      const reachable = reports.filter((r) => r.reachable).length;
-      statusEl.textContent = `Probed ${reports.length} tool name${reports.length === 1 ? '' : 's'}, ${reachable} reachable`;
+      const ok = reports.filter((r) => r.outcome === 'ok').length;
+      statusEl.textContent = `Probed ${reports.length} call${reports.length === 1 ? '' : 's'}, ${ok} succeeded`;
     } catch (err) {
       statusEl.textContent = `Probe failed: ${err?.message ?? 'unknown error'}`;
     }

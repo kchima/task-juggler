@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { unwrapMcpResult, fetchRawContext, slackThreadText, summarizeMcpShape, probeTool } from '../src/mcpAdapters.js';
+import { unwrapMcpResult, fetchRawContext, slackThreadText, summarizeMcpShape, probeTool, isAllowlistError } from '../src/mcpAdapters.js';
 import acmeIssue from './fixtures/linear-acme-issue.json' with { type: 'json' };
 import slackThread from './fixtures/slack-thread.json' with { type: 'json' };
 
@@ -120,21 +120,49 @@ describe('summarizeMcpShape / probeTool', () => {
     expect(shape.hasStructuredContent).toBe(true);
   });
 
-  it('probeTool reports an unreachable tool as a result rather than throwing — "not exposed here" is the answer, not an error', async () => {
+  it('probeTool reports a thrown call as unreachable rather than throwing — "not exposed here" is the answer, not an error', async () => {
     const callMcpTool = vi.fn().mockRejectedValue(new Error('No such tool available'));
     const report = await probeTool(callMcpTool, 'mcp__session_info__list_sessions', { limit: 3 });
-    expect(report.reachable).toBe(false);
+    expect(report.outcome).toBe('unreachable');
     expect(report.error).toBe('No such tool available');
     expect(report.shape).toBeNull();
     expect(report.name).toBe('mcp__session_info__list_sessions');
   });
 
-  it('probeTool returns the shape summary for a reachable tool', async () => {
+  it('probeTool returns the shape summary for a successful call', async () => {
     const callMcpTool = vi.fn().mockResolvedValue({ content: [{ text: 'Sessions (0 of 0)' }], isError: false });
     const report = await probeTool(callMcpTool, 'mcp__x__list_sessions', { limit: 3 });
-    expect(report.reachable).toBe(true);
+    expect(report.outcome).toBe('ok');
     expect(report.shape.unwrappedType).toBe('string');
     expect(callMcpTool).toHaveBeenCalledWith('mcp__x__list_sessions', { limit: 3 });
+  });
+
+  // The regression that matters most here: a first version of this reported
+  // isError:true as a success, because callMcpTool had returned rather than
+  // thrown. Two hard failures were displayed as "2/3 reachable".
+  it('reports an isError response as a tool-error, NOT a success — returning is not succeeding', async () => {
+    const callMcpTool = vi.fn().mockResolvedValue({
+      content: [{ type: 'text', text: 'Tool call failed: 400 ' }], isError: true,
+    });
+    const report = await probeTool(callMcpTool, 'mcp__session_info__list_sessions', { limit: 3 });
+    expect(report.outcome).toBe('tool-error');
+    expect(report.error).toBe('Tool call failed: 400 ');
+    // The shape is still captured, because a refusal's body carries the reason.
+    expect(report.shape.isError).toBe(true);
+    expect(report.shape.rawJson).toContain('400');
+  });
+
+  it('extracts an allowlist refusal so it can be told apart from every other failure', async () => {
+    const text = 'Tool "mcp__ccd_session_mgmt__list_sessions" is not in this artifact\'s mcp_tools allowlist.';
+    const callMcpTool = vi.fn().mockResolvedValue({ content: [{ type: 'text', text }], isError: true });
+    const report = await probeTool(callMcpTool, 'mcp__ccd_session_mgmt__list_sessions', { limit: 3 });
+    expect(report.outcome).toBe('tool-error');
+    expect(isAllowlistError(report.error)).toBe(true);
+  });
+
+  it('does not mistake an ordinary tool failure for an allowlist problem', () => {
+    expect(isAllowlistError('Tool call failed: 400 ')).toBe(false);
+    expect(isAllowlistError(null)).toBe(false);
   });
 
   it('truncates a huge response instead of dumping an unbounded blob into the UI', () => {

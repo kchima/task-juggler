@@ -2,7 +2,7 @@ import {
   loadTasks, saveTasks, patchTask, addTask, deleteTask,
   loadDismissedKeys, addDismissedKey, clearDismissedKeys, loadWatermarks, setWatermark,
 } from './storage.js';
-import { fetchRawContext, unwrapMcpResult, slackThreadText, probeTool } from './mcpAdapters.js';
+import { fetchRawContext, unwrapMcpResult, slackThreadText, probeTool, isAllowlistError } from './mcpAdapters.js';
 import { normalizeLinearIssue, normalizeSlackThread } from './normalize.js';
 import { djb2Hash } from './hash.js';
 import { refreshTaskViaAi } from './aiClient.js';
@@ -412,19 +412,37 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
     'mcp__ccd_session_mgmt__list_sessions',
   ];
 
+  // A bare "400" from a tool that IS allowlisted usually means the arguments
+  // are wrong, not that the tool is unusable — so try a few plausible shapes
+  // rather than reporting one failure and stopping. Small limits throughout:
+  // this is a shape probe, not a data pull, and a 195-session dump would bury
+  // the structure being read.
+  const SESSION_PROBE_ARG_VARIANTS = [{ limit: 3 }, {}, { limit: '3' }];
+
   // Runs on demand (never on the auto-refresh tick — it deliberately calls
   // tools that may not exist). Answers the two questions no amount of
-  // describing a response can: is this tool reachable from inside the
-  // artifact's sandbox at all, and what does it *literally* return here.
+  // describing a response can: can this tool be called from inside the
+  // artifact's sandbox, and what does it *literally* return here.
   async function probeSessionTools() {
     const names = [...new Set([
       ...(toolNames.sessionList ? [toolNames.sessionList] : []),
       ...(toolNames.sessionProbeNames ?? []),
       ...KNOWN_SESSION_TOOL_NAMES,
     ])];
-    // Small limit: this is a shape probe, not a data pull, and a 195-session
-    // dump would bury the structure we're trying to read.
-    return Promise.all(names.map((name) => probeTool(callMcpTool, name, { limit: 3 })));
+
+    const reports = [];
+    for (const name of names) {
+      for (const args of SESSION_PROBE_ARG_VARIANTS) {
+        const report = await probeTool(callMcpTool, name, args);
+        reports.push(report);
+        if (report.outcome === 'ok') break; // found a working signature
+        // An allowlist refusal is about the tool, not the arguments — more
+        // variants would just produce identical noise.
+        if (isAllowlistError(report.error)) break;
+        if (report.outcome === 'unreachable') break;
+      }
+    }
+    return reports;
   }
 
   // Coded against the live-verified ccd_session_mgmt shape only:

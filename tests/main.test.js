@@ -208,10 +208,11 @@ describe('mountApp', () => {
   it('clicking Probe calls probeSessionTools and opens the panel with the raw result', async () => {
     const app = fakeApp({
       probeSessionTools: vi.fn().mockResolvedValue([
-        { name: 'mcp__session_info__list_sessions', reachable: false, error: 'No such tool available', shape: null },
-        { name: 'mcp__ccd_session_mgmt__list_sessions', reachable: true, error: null, shape: {
+        { name: 'mcp__session_info__list_sessions', args: { limit: 3 }, outcome: 'unreachable', error: 'No such tool available', shape: null },
+        { name: 'mcp__ccd_session_mgmt__list_sessions', args: { limit: 3 }, outcome: 'ok', error: null, shape: {
           isError: false, hasStructuredContent: true, contentTextType: 'undefined',
-          unwrappedType: 'array', unwrappedKeys: null, stringValuedKeys: null, rawJson: '[]',
+          unwrappedType: 'array', unwrappedKeys: null, stringValuedKeys: null,
+          payloadPreviews: [], rawJson: '[]',
         } },
       ]),
     });
@@ -226,7 +227,7 @@ describe('mountApp', () => {
     expect(probeEl.hidden).toBe(false);
     expect(probeEl.open).toBe(true); // opened for the user, since they explicitly asked for it
     expect(probeEl.textContent).toContain('No such tool available');
-    expect(document.getElementById('jg-status').textContent).toContain('1 reachable');
+    expect(document.getElementById('jg-status').textContent).toContain('1 succeeded');
   });
 
   it('the auto-refresh tick never probes — probing deliberately calls tools that may not exist', () => {

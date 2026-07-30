@@ -36,15 +36,26 @@ instance-specific prefixes (e.g. `mcp__<uuid>__slack_read_thread`):
   because a pasted Linear URL's workspace slug (e.g. `acme`) and the team name
   from `list_teams` (e.g. `Acme`) won't always share casing — you don't need to
   normalize this yourself, just pass the label through as captured.
-- **Claude Desktop sessions (important — this is a primary task source):** look
-  for a session-management MCP server, `ccd_session_mgmt`. Verified live: its
-  `list_sessions` returns `{ sessionId, title, cwd, isArchived, isRunning,
-  lastActivityAt }` and `list_events` returns a plaintext transcript rendering
-  with a `limit` param for reading just the tail. Record both names as
-  `sessionList` and `sessionEvents`. If this server is NOT exposed to the
-  artifact's `mcp_tools` allowlist, Claude Desktop session detection silently
-  does nothing — so verify it appears in the artifact's allowed tools, and tell
-  the user plainly if it doesn't rather than leaving the feature quietly dead.
+- **Claude Desktop / Cowork sessions:** which server exists depends on the
+  host, and they are NOT interchangeable. Claude Code exposes
+  `ccd_session_mgmt`, whose `list_sessions` returns a real array of
+  `{ sessionId, title, cwd, isArchived, isRunning, lastActivityAt }` (verified
+  live) with `list_events` for the transcript tail. Cowork has been observed
+  exposing `session_info` instead, which returns **prose**, not JSON, and has
+  no `isArchived`/`lastActivityAt` at all — so the staleness filtering the
+  code does cannot work against it. Record whichever exists as `sessionList` /
+  `sessionEvents`, and don't assume the shape: use the artifact's **Probe**
+  button, which calls each candidate and reports the literal response.
+
+  **The `mcp_tools` allowlist is a hard gate, and it is the most likely reason
+  this source is dead.** A tool absent from the allowlist declared at
+  `create_artifact` time is refused before the call happens, with
+  `Tool "<name>" is not in this artifact's mcp_tools allowlist.` — verified
+  from inside a deployed artifact. Retrying with different arguments will
+  never help; the name has to be added to `mcp_tools`. This is distinct from
+  a `Tool call failed: 400`, which means the tool WAS reachable and rejected
+  the arguments instead. The Probe distinguishes these two and sweeps a few
+  argument shapes automatically.
 
 ## Create or repair the artifact
 
@@ -57,8 +68,11 @@ instance-specific prefixes (e.g. `mcp__<uuid>__slack_read_thread`):
      slackReadThread: "mcp__...__slack_read_thread",
      slackSearch:     "mcp__...__slack_search_public_and_private",
      todoistFindTasks:"mcp__...__find-tasks",
-     sessionList:     "mcp__...__list_sessions",   // ccd_session_mgmt
-     sessionEvents:   "mcp__...__list_events",     // ccd_session_mgmt
+     sessionList:     "mcp__...__list_sessions",   // whichever server exists
+     sessionEvents:   "mcp__...__list_events",     // (see the probe note above)
+     // Extra names for the Probe button to try, beyond the built-in
+     // candidates — handy when a host renames a server.
+     sessionProbeNames: [],
      linearWorkspaces: { "Acme": "mcp__...__", "Globex": "mcp__...__" },
    };
    ```
@@ -66,6 +80,10 @@ instance-specific prefixes (e.g. `mcp__<uuid>__slack_read_thread`):
    gracefully rather than erroring, so a missing connector is survivable.
 3. Call `mcp__cowork__create_artifact` (first run) or `update_artifact` (repair)
    with this HTML and the `mcp_tools` list containing every probed tool name.
+   **`mcp_tools` is the gate**: anything omitted here is refused at call time
+   no matter what `__JUGGLER_TOOL_NAMES__` says, so include every session
+   tool candidate you want the Probe button to be able to reach — otherwise
+   the probe can only ever report an allowlist refusal for it.
 4. Confirm to the user that the artifact was created/updated and that its state
    (via `localStorage`) persists across sessions.
 

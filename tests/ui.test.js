@@ -137,7 +137,7 @@ describe('renderProbe', () => {
   it('renders the prose payload with its real line breaks so the literal format can be read off the screen', () => {
     const container = probeFixture();
     renderProbe(container, [{
-      name: 'mcp__session_info__list_sessions', reachable: true, error: null,
+      name: 'mcp__session_info__list_sessions', args: { limit: 3 }, outcome: 'ok', error: null,
       shape: {
         isError: false, hasStructuredContent: false, contentTextType: 'string',
         unwrappedType: 'string', unwrappedKeys: null, stringValuedKeys: null,
@@ -154,30 +154,60 @@ describe('renderProbe', () => {
     expect(container.textContent).toContain('raw response (JSON-escaped):');
   });
 
-  it('shows an unreachable tool as unreachable with its reason, not as a silent omission', () => {
+  // A returned-but-refused call is NOT a success, and showing it as one is
+  // exactly how the first version of this panel reported two hard failures
+  // as "2/3 reachable".
+  it('distinguishes ok / tool-error / unreachable, and counts only real successes', () => {
     const container = probeFixture();
     renderProbe(container, [
-      { name: 'mcp__session_info__list_sessions', reachable: false, error: 'No such tool available', shape: null },
-      { name: 'mcp__ccd_session_mgmt__list_sessions', reachable: true, error: null, shape: {
+      { name: 'a', args: { limit: 3 }, outcome: 'tool-error', error: 'Tool call failed: 400 ', shape: {
+        isError: true, hasStructuredContent: false, contentTextType: 'string',
+        unwrappedType: 'null', unwrappedKeys: null, stringValuedKeys: null,
+        payloadPreviews: [], rawJson: '{"isError":true}',
+      } },
+      { name: 'b', args: {}, outcome: 'unreachable', error: 'no bridge', shape: null },
+      { name: 'c', args: { limit: 3 }, outcome: 'ok', error: null, shape: {
         isError: false, hasStructuredContent: true, contentTextType: 'undefined',
-        unwrappedType: 'array', unwrappedKeys: null, stringValuedKeys: null, rawJson: '[]',
+        unwrappedType: 'array', unwrappedKeys: null, stringValuedKeys: null,
+        payloadPreviews: [], rawJson: '[]',
       } },
     ]);
-    expect(container.hidden).toBe(false);
-    expect(container.querySelector('summary').textContent).toContain('1/2 reachable');
+    expect(container.querySelector('summary').textContent).toContain('1/3 calls succeeded');
+    const names = [...container.querySelectorAll('.jg-probe-name')].map((e) => e.textContent);
+    expect(names[0]).toContain('⚠ a');
+    expect(names[1]).toContain('✗ b');
+    expect(names[2]).toContain('✓ c');
+
     const bodies = [...container.querySelectorAll('.jg-probe-body')].map((el) => el.textContent);
-    expect(bodies[0]).toContain('not reachable from this artifact: No such tool available');
-    expect(bodies[1]).toContain('unwrapped type: array');
+    expect(bodies[0]).toContain('tool was reached but refused the call:');
+    expect(bodies[0]).toContain('Tool call failed: 400');
+    // A refusal still shows its raw body — that's where the real reason lives.
+    expect(container.textContent).toContain('{"isError":true}');
+  });
+
+  it('shows the arguments tried, since the same name can fail one way and succeed another', () => {
+    const container = probeFixture();
+    renderProbe(container, [
+      { name: 'a', args: { limit: 3 }, outcome: 'tool-error', error: 'Tool call failed: 400 ', shape: null },
+      { name: 'a', args: {}, outcome: 'ok', error: null, shape: {
+        isError: false, hasStructuredContent: false, contentTextType: 'string',
+        unwrappedType: 'string', unwrappedKeys: null, stringValuedKeys: null,
+        payloadPreviews: [], rawJson: '""',
+      } },
+    ]);
+    const names = [...container.querySelectorAll('.jg-probe-name')].map((e) => e.textContent);
+    expect(names[0]).toContain('{"limit":3}');
+    expect(names[1]).toContain('{}');
   });
 
   it('surfaces the envelope keys prominently, since that is the answer being hunted', () => {
     const container = probeFixture();
     renderProbe(container, [{
-      name: 'mcp__x__list_sessions', reachable: true, error: null,
+      name: 'mcp__x__list_sessions', args: { limit: 3 }, outcome: 'ok', error: null,
       shape: {
         isError: false, hasStructuredContent: false, contentTextType: 'string',
         unwrappedType: 'object', unwrappedKeys: ['sessions', 'pagination_info'],
-        stringValuedKeys: ['sessions'], rawJson: '{}',
+        stringValuedKeys: ['sessions'], payloadPreviews: [], rawJson: '{}',
       },
     }]);
     const body = container.querySelector('.jg-probe-body').textContent;

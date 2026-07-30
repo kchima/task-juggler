@@ -713,3 +713,62 @@ describe('createApp resilience — one failing connector must not block the othe
     expect(app.getTasks().find((t) => t.id === 'tracked-bad').summary).toBe(''); // untouched, not corrupted
   });
 });
+
+// Built directly from a real probe run inside a deployed Cowork artifact,
+// which returned two DIFFERENT failures that a naive probe conflated:
+// session_info answered "Tool call failed: 400" (reached, refused the
+// arguments) while ccd_session_mgmt answered "not in this artifact's
+// mcp_tools allowlist" (refused outright, arguments irrelevant).
+describe('createApp.probeSessionTools', () => {
+  let storage;
+  beforeEach(() => { storage = fakeStorage(); });
+
+  const PROBE_TOOL_NAMES = { ...TOOL_NAMES, sessionList: '', sessionEvents: '' };
+
+  it('retries other argument shapes when a reachable tool rejects the first one, and stops at the one that works', async () => {
+    const callMcpTool = vi.fn(async (name, args) => {
+      if (name !== 'mcp__session_info__list_sessions') {
+        return { content: [{ text: 'nope' }], isError: true };
+      }
+      // Mirrors the real 400: the tool is allowed, the arguments are not.
+      if (Object.keys(args).length > 0) {
+        return { content: [{ type: 'text', text: 'Tool call failed: 400 ' }], isError: true };
+      }
+      return { content: [{ type: 'text', text: 'Sessions (2 of 195)\n - abc "T" (idle, cwd: /x, is_child: false)\n' }], isError: false };
+    });
+    const app = createApp({ storage, callMcpTool, askClaude: vi.fn(), toolNames: PROBE_TOOL_NAMES });
+    const reports = await app.probeSessionTools();
+
+    const sessionInfo = reports.filter((r) => r.name === 'mcp__session_info__list_sessions');
+    expect(sessionInfo.map((r) => r.outcome)).toEqual(['tool-error', 'ok']);
+    expect(sessionInfo[1].args).toEqual({});
+    // Stopped once it worked rather than grinding through every variant.
+    expect(sessionInfo).toHaveLength(2);
+    expect(sessionInfo[1].shape.payloadPreviews[0].text).toContain('is_child: false');
+  });
+
+  it('does not retry argument variants against an allowlist refusal — the arguments are not the problem', async () => {
+    const allowlistText = 'Tool "mcp__ccd_session_mgmt__list_sessions" is not in this artifact\'s mcp_tools allowlist.';
+    const callMcpTool = vi.fn(async (name) => {
+      if (name === 'mcp__ccd_session_mgmt__list_sessions') {
+        return { content: [{ type: 'text', text: allowlistText }], isError: true };
+      }
+      return { content: [{ type: 'text', text: 'Tool call failed: 400 ' }], isError: true };
+    });
+    const app = createApp({ storage, callMcpTool, askClaude: vi.fn(), toolNames: PROBE_TOOL_NAMES });
+    const reports = await app.probeSessionTools();
+
+    const ccd = reports.filter((r) => r.name === 'mcp__ccd_session_mgmt__list_sessions');
+    expect(ccd).toHaveLength(1);
+    expect(ccd[0].outcome).toBe('tool-error');
+    expect(ccd[0].error).toContain('allowlist');
+  });
+
+  it('reports zero successes when every call fails, rather than counting refusals as reachable', async () => {
+    const callMcpTool = vi.fn(async () => ({ content: [{ type: 'text', text: 'Tool call failed: 400 ' }], isError: true }));
+    const app = createApp({ storage, callMcpTool, askClaude: vi.fn(), toolNames: PROBE_TOOL_NAMES });
+    const reports = await app.probeSessionTools();
+    expect(reports.length).toBeGreaterThan(0);
+    expect(reports.filter((r) => r.outcome === 'ok')).toHaveLength(0);
+  });
+});

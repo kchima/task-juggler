@@ -76,27 +76,34 @@ export function renderProbe(container, reports) {
     return;
   }
   container.hidden = false;
-  const reachable = reports.filter((r) => r.reachable).length;
-  container.querySelector('summary').textContent = `Connector probe — ${reachable}/${reports.length} reachable`;
+  const ok = reports.filter((r) => r.outcome === 'ok').length;
+  container.querySelector('summary').textContent = `Connector probe — ${ok}/${reports.length} call${reports.length === 1 ? '' : 's'} succeeded`;
+
+  const ICON = { ok: '✓', 'tool-error': '⚠', unreachable: '✗' };
 
   for (const report of reports) {
     const li = document.createElement('li');
 
     const heading = document.createElement('div');
     heading.className = 'jg-probe-name';
-    heading.textContent = `${report.reachable ? '✓' : '✗'} ${report.name}`;
+    // Args are part of the identity of the attempt: the same name can fail
+    // with one signature and succeed with another, and that difference is
+    // the finding.
+    heading.textContent = `${ICON[report.outcome] ?? '?'} ${report.name}  ${JSON.stringify(report.args)}`;
     li.appendChild(heading);
 
     const body = document.createElement('pre');
     body.className = 'jg-probe-body';
-    body.textContent = report.reachable
+    body.textContent = report.outcome === 'ok'
       ? [
         `unwrapped type: ${report.shape.unwrappedType}`,
         `envelope keys:  ${report.shape.unwrappedKeys ? JSON.stringify(report.shape.unwrappedKeys) : '(not an object)'}`,
         `string-valued:  ${report.shape.stringValuedKeys ? JSON.stringify(report.shape.stringValuedKeys) : '(n/a)'}`,
-        `isError: ${report.shape.isError}  structuredContent: ${report.shape.hasStructuredContent}  content[0].text: ${report.shape.contentTextType}`,
+        `structuredContent: ${report.shape.hasStructuredContent}  content[0].text: ${report.shape.contentTextType}`,
       ].join('\n')
-      : `not reachable from this artifact: ${report.error}`;
+      : report.outcome === 'tool-error'
+        ? `tool was reached but refused the call:\n${report.error}`
+        : `call could not be made at all:\n${report.error}`;
     li.appendChild(body);
 
     // Each string payload verbatim, with real line breaks — this is the
@@ -114,7 +121,10 @@ export function renderProbe(container, reports) {
       li.appendChild(pre);
     }
 
-    if (report.reachable) {
+    // Shown for tool-errors too, not just successes — a refusal's raw body
+    // often carries the actual reason (an allowlist name, a validation
+    // message) that the summary line alone would lose.
+    if (report.shape) {
       const label = document.createElement('div');
       label.className = 'jg-probe-sublabel';
       label.textContent = 'raw response (JSON-escaped):';

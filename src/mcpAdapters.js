@@ -80,14 +80,38 @@ function safeStringify(value) {
   }
 }
 
-// Calls one tool and reports what came back, never throwing — a name that
-// isn't reachable is itself a result worth seeing, not an error to swallow.
+export function mcpErrorText(raw) {
+  const text = raw?.content?.[0]?.text;
+  return typeof text === 'string' && text.trim() ? text : 'unknown tool error';
+}
+
+// An artifact declares an `mcp_tools` allowlist when it's created; a tool
+// outside it is refused before the call is even attempted. That's a
+// *configuration* failure with a specific fix (add the name to the
+// allowlist) and no amount of retrying with different arguments will help,
+// which is why it's worth telling apart from every other error.
+export function isAllowlistError(text) {
+  return typeof text === 'string' && /allowlist/i.test(text);
+}
+
+// Calls one tool and reports what came back, never throwing. Three outcomes,
+// deliberately distinct: 'unreachable' (the call itself threw — no bridge, no
+// such tool), 'tool-error' (the call returned, but with isError set — the
+// tool was reached and refused), and 'ok'. Collapsing the middle case into
+// "reachable" is exactly the mistake that made a first version of this report
+// two hard failures as successes.
 export async function probeTool(callMcpTool, name, args) {
   try {
     const raw = await callMcpTool(name, args);
-    return { name, args, reachable: true, error: null, shape: summarizeMcpShape(raw) };
+    const shape = summarizeMcpShape(raw);
+    return {
+      name, args,
+      outcome: shape.isError ? 'tool-error' : 'ok',
+      error: shape.isError ? mcpErrorText(raw) : null,
+      shape,
+    };
   } catch (err) {
-    return { name, args, reachable: false, error: err?.message ?? 'call failed', shape: null };
+    return { name, args, outcome: 'unreachable', error: err?.message ?? 'call failed', shape: null };
   }
 }
 

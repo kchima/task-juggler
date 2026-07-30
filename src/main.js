@@ -132,8 +132,8 @@ export function mountApp(doc, app, options = {}) {
       const reports = await app.probeSessionTools();
       renderProbe(doc.getElementById('jg-probe'), reports);
       doc.getElementById('jg-probe').open = true;
-      const reachable = reports.filter((r) => r.reachable).length;
-      statusEl.textContent = `Probed ${reports.length} tool name${reports.length === 1 ? '' : 's'}, ${reachable} reachable`;
+      const ok = reports.filter((r) => r.outcome === 'ok').length;
+      statusEl.textContent = `Probed ${reports.length} call${reports.length === 1 ? '' : 's'}, ${ok} succeeded`;
     } catch (err) {
       statusEl.textContent = `Probe failed: ${err?.message ?? 'unknown error'}`;
     }
