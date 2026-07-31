@@ -13,6 +13,8 @@ function domFixture() {
     <input id="jg-add-input" />
     <button id="jg-add-btn"></button>
     <button id="jg-view-toggle"></button>
+    <label id="jg-lookback-label" for="jg-lookback-input"></label>
+    <input type="date" id="jg-lookback-input" />
     <button id="jg-refresh-btn"></button>
     <button id="jg-probe-btn"></button>
     <span id="jg-status"></span>
@@ -32,6 +34,8 @@ function fakeApp(overrides = {}) {
       skipped: false, scanned: 0, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false,
     }),
     probeSessionTools: vi.fn().mockResolvedValue([]),
+    getSlackLookbackDate: vi.fn().mockReturnValue(null),
+    setSlackLookbackDate: vi.fn(),
     addManualTask: vi.fn(),
     addByLink: vi.fn(),
     cycleStatusManual: vi.fn(),
@@ -247,6 +251,44 @@ describe('mountApp', () => {
     await Promise.resolve();
     expect(app.probeSessionTools).not.toHaveBeenCalled();
     expect(document.getElementById('jg-status').textContent).toContain('no connectors to probe');
+  });
+
+  it('populates the lookback input from the stored override on mount', () => {
+    const app = fakeApp({ getSlackLookbackDate: vi.fn().mockReturnValue('2026-07-20') });
+    mountApp(document, app);
+    expect(document.getElementById('jg-lookback-input').value).toBe('2026-07-20');
+  });
+
+  it('leaves the lookback input blank on mount when there is no stored override', () => {
+    const app = fakeApp();
+    mountApp(document, app);
+    expect(document.getElementById('jg-lookback-input').value).toBe('');
+  });
+
+  it('saves the lookback date on change, without triggering a refresh as a side effect', () => {
+    const app = fakeApp();
+    mountApp(document, app);
+    const input = document.getElementById('jg-lookback-input');
+    input.value = '2026-07-20';
+    input.dispatchEvent(new Event('change'));
+    expect(app.setSlackLookbackDate).toHaveBeenCalledWith('2026-07-20');
+    expect(app.refreshAll).not.toHaveBeenCalled();
+  });
+
+  it('clearing the lookback input saves an empty string, not the previous value', () => {
+    const app = fakeApp({ getSlackLookbackDate: vi.fn().mockReturnValue('2026-07-20') });
+    mountApp(document, app);
+    const input = document.getElementById('jg-lookback-input');
+    input.value = '';
+    input.dispatchEvent(new Event('change'));
+    expect(app.setSlackLookbackDate).toHaveBeenCalledWith('');
+  });
+
+  it('sets max to today so picking a future date is not offered, even in offline mode', () => {
+    const app = fakeApp();
+    mountApp(document, app, { offline: true });
+    const input = document.getElementById('jg-lookback-input');
+    expect(input.max).toBe(new Date().toISOString().slice(0, 10));
   });
 
   it('in offline mode, refresh does not call the app and says so instead of throwing', async () => {

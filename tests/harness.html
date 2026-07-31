@@ -16,9 +16,11 @@
   const state = { slackVersion: 1, breakLinearGlobex: false, breakSlackAskClaude: false };
   window.__JUGGLER_TOOL_NAMES__ = MOCK_TOOL_NAMES;
 
+  window.__jugglerToolCalls = [];
   window.cowork = {
     async callMcpTool(name, args) {
       console.log('[mock callMcpTool]', name, args);
+      window.__jugglerToolCalls.push({ name, args });
       if (name === `${MOCK_TOOL_NAMES.linearWorkspaces.Globex}list_issues` && state.breakLinearGlobex) {
         throw new Error('connector invalidated, needs reconnect');
       }

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createApp } from '../src/app.js';
 import { nextStatus } from '../src/ui.js';
 import { buildSlackRecentQueries } from '../src/discovery.js';
+import { setSlackLookbackDate } from '../src/storage.js';
 import acmeIssue from './fixtures/linear-acme-issue.json' with { type: 'json' };
 import slackThread from './fixtures/slack-thread.json' with { type: 'json' };
 
@@ -343,6 +344,26 @@ describe('createApp.runSlackTriage', () => {
       expect(args.query).not.toContain('(');
       expect(args.query).not.toContain('OR');
     }
+  });
+
+  it('uses the stored lookback override in the search query instead of the default 24h window', async () => {
+    setSlackLookbackDate('2026-07-20', storage);
+    const callMcpTool = mockCallMcpTool();
+    const app = createApp({ storage, callMcpTool, askClaude: vi.fn().mockResolvedValue(JSON.stringify(ONGOING_VERDICT)), toolNames: TOOL_NAMES });
+    await app.runSlackTriage({ force: true });
+    const searchCalls = callMcpTool.mock.calls.filter(([name]) => name === TOOL_NAMES.slackSearch);
+    for (const [, args] of searchCalls) {
+      expect(args.query).toContain('after:2026-07-20');
+    }
+  });
+
+  it('getSlackLookbackDate/setSlackLookbackDate round-trip through the app, and an empty string clears back to the default', async () => {
+    const app = createApp({ storage, callMcpTool: vi.fn(), askClaude: vi.fn(), toolNames: TOOL_NAMES });
+    expect(app.getSlackLookbackDate()).toBeNull();
+    app.setSlackLookbackDate('2026-07-20');
+    expect(app.getSlackLookbackDate()).toBe('2026-07-20');
+    app.setSlackLookbackDate('');
+    expect(app.getSlackLookbackDate()).toBeNull();
   });
 
   it('adds a new task from an untracked thread the batch verdict calls ongoing', async () => {

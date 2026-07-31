@@ -146,6 +146,17 @@ export function mountApp(doc, app, options = {}) {
     render();
   });
 
+  // Purely a stored preference — no bridge call involved, so this stays
+  // usable even offline. Saved immediately on change; takes effect on the
+  // next refresh rather than triggering one itself, so picking a date isn't
+  // a surprise network action.
+  const lookbackInput = doc.getElementById('jg-lookback-input');
+  lookbackInput.max = new Date().toISOString().slice(0, 10); // picking a future date makes no sense
+  lookbackInput.value = app.getSlackLookbackDate() ?? '';
+  lookbackInput.addEventListener('change', () => {
+    app.setSlackLookbackDate(lookbackInput.value);
+  });
+
   if (autoRefreshMs) {
     setInterval(() => {
       if (doc.visibilityState && doc.visibilityState !== 'visible') return;

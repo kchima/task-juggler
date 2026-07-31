@@ -1,6 +1,7 @@
 const STORAGE_KEY = 'task-juggler:tasks:v1';
 const DISMISSED_KEY = 'task-juggler:dismissed:v1';
 const WATERMARKS_KEY = 'task-juggler:watermarks:v1';
+const SLACK_LOOKBACK_KEY = 'task-juggler:slackLookbackDate:v1';
 
 function readJson(storageImpl, key, fallback) {
   const raw = storageImpl.getItem(key);
@@ -87,4 +88,20 @@ export function setWatermark(key, signal, storageImpl = globalThis.localStorage)
   marks[key] = signal;
   storageImpl.setItem(WATERMARKS_KEY, JSON.stringify(marks));
   return marks;
+}
+
+// --- Slack lookback override ----------------------------------------------
+// The default lookback (last 24h) never changes on its own — this is purely
+// an opt-in widening for "I know there's a thread from N days ago, catch it
+// this time." An empty string means "no override, use the default," rather
+// than `removeItem`, so this works against any minimal storage stub that
+// only implements getItem/setItem (the same contract every other function
+// here already assumes).
+
+export function loadSlackLookbackDate(storageImpl = globalThis.localStorage) {
+  return storageImpl.getItem(SLACK_LOOKBACK_KEY) || null;
+}
+
+export function setSlackLookbackDate(dateStr, storageImpl = globalThis.localStorage) {
+  storageImpl.setItem(SLACK_LOOKBACK_KEY, dateStr || '');
 }

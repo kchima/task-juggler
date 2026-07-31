@@ -12,6 +12,8 @@
   button { font: inherit; cursor: pointer; border: 1px solid #999; background: transparent; color: inherit; border-radius: 6px; padding: 4px 10px; }
   button:hover { background: rgba(128,128,128,0.15); }
   #jg-add-input { font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid #999; background: transparent; color: inherit; flex: 1; min-width: 160px; }
+  #jg-lookback-label { font-size: 12px; opacity: 0.7; white-space: nowrap; }
+  #jg-lookback-input { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid #999; background: transparent; color: inherit; }
   #jg-status { font-size: 12px; opacity: 0.7; }
   .jg-row { display: flex; gap: 8px; align-items: center; padding: 6px 4px; border-bottom: 1px solid rgba(128,128,128,0.25); font-size: 14px; }
   .jg-row-completed { opacity: 0.55; text-decoration: line-through; }
@@ -73,6 +75,8 @@
   <input id="jg-add-input" type="text" placeholder="Add a task, or paste a Slack/Linear/any link…" />
   <button id="jg-add-btn">Add</button>
   <button id="jg-view-toggle">Toggle view</button>
+  <label id="jg-lookback-label" for="jg-lookback-input" title="Widen Slack discovery to catch older threads. Leave blank for the default (last 24h).">Slack since</label>
+  <input type="date" id="jg-lookback-input" />
   <button id="jg-refresh-btn">Refresh</button>
   <button id="jg-probe-btn" title="Call session-listing tools and show exactly what they return">Probe</button>
   <span id="jg-status"></span>

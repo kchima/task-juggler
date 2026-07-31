@@ -1,6 +1,7 @@
 import {
   loadTasks, saveTasks, patchTask, addTask, deleteTask,
   loadDismissedKeys, addDismissedKey, clearDismissedKeys, loadWatermarks, setWatermark,
+  loadSlackLookbackDate, setSlackLookbackDate,
 } from './storage.js';
 import { fetchRawContext, unwrapMcpResult, slackThreadText, probeTool, isAllowlistError } from './mcpAdapters.js';
 import { normalizeLinearIssue, normalizeSlackThread } from './normalize.js';
@@ -392,7 +393,8 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
       configNotes.push({ key: 'slack:not-configured', label: 'no search tool configured (slackSearch is unset) — only already-tracked threads are refreshed', outcome: 'not-configured' });
     }
     if (toolNames.slackSearch) {
-      for (const query of buildSlackRecentQueries(now())) {
+      const lookbackOverride = loadSlackLookbackDate(storage);
+      for (const query of buildSlackRecentQueries(now(), lookbackOverride)) {
         try {
           const searchResult = await callMcpTool(toolNames.slackSearch, { query, limit: 20 });
           const unwrapped = unwrapMcpResult(searchResult);
@@ -646,6 +648,8 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
 
   return {
     getTasks, refreshAll, refreshOne, discoverNewTasks, runSlackTriage, probeSessionTools,
+    getSlackLookbackDate: () => loadSlackLookbackDate(storage),
+    setSlackLookbackDate: (dateStr) => setSlackLookbackDate(dateStr, storage),
     addManualTask, addByLink, cycleStatusManual, reopen, remove, undismissAll,
   };
 }

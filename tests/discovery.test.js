@@ -104,6 +104,16 @@ describe('buildSlackRecentQueries', () => {
       expect(q).not.toContain('OR');
     }
   });
+
+  it('uses the override date instead of the default 24h window when one is given', () => {
+    const queries = buildSlackRecentQueries(new Date('2026-07-29T12:00:00Z'), '2026-07-26');
+    expect(queries).toEqual(['is:thread to:me after:2026-07-26', 'is:thread from:me after:2026-07-26']);
+  });
+
+  it('ignores a falsy override and falls back to the default — an empty string means "no override," not "after everything"', () => {
+    const queries = buildSlackRecentQueries(new Date('2026-07-29T12:00:00Z'), '');
+    expect(queries).toEqual(['is:thread to:me after:2026-07-28', 'is:thread from:me after:2026-07-28']);
+  });
 });
 
 describe('buildSlackBatchPrompt', () => {

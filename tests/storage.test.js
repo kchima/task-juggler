@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { loadTasks, saveTasks, patchTask, addTask, deleteTask } from '../src/storage.js';
+import { loadTasks, saveTasks, patchTask, addTask, deleteTask, loadSlackLookbackDate, setSlackLookbackDate } from '../src/storage.js';
 
 beforeEach(() => {
   localStorage.clear();
@@ -63,5 +63,36 @@ describe('storage interface', () => {
     addTask({ id: '1', title: 'a' }, fake);
     expect(loadTasks(fake)).toEqual([{ id: '1', title: 'a' }]);
     expect(loadTasks()).toEqual([]);
+  });
+});
+
+describe('Slack lookback override', () => {
+  it('defaults to null (no override) when nothing has been set', () => {
+    expect(loadSlackLookbackDate()).toBeNull();
+  });
+
+  it('round-trips a chosen date', () => {
+    setSlackLookbackDate('2026-07-26');
+    expect(loadSlackLookbackDate()).toBe('2026-07-26');
+  });
+
+  it('clearing back to an empty string reads back as null, not as an empty string', () => {
+    setSlackLookbackDate('2026-07-26');
+    setSlackLookbackDate('');
+    expect(loadSlackLookbackDate()).toBeNull();
+  });
+
+  it('works against a minimal storage stub with only getItem/setItem — no removeItem required', () => {
+    const fake = (() => {
+      const map = new Map();
+      return {
+        getItem: (k) => (map.has(k) ? map.get(k) : null),
+        setItem: (k, v) => map.set(k, v),
+      };
+    })();
+    setSlackLookbackDate('2026-07-26', fake);
+    expect(loadSlackLookbackDate(fake)).toBe('2026-07-26');
+    setSlackLookbackDate('', fake);
+    expect(loadSlackLookbackDate(fake)).toBeNull();
   });
 });

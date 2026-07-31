@@ -61,12 +61,15 @@ function stripSlackJsonCodeFences(text) {
 // `is:thread (to:me OR from:me)` silently under-returns. Live-probe-verified:
 // plain single-clause queries (`is:thread to:me`, `is:thread from:me`) work.
 // Two simple queries beat one clever broken one.
-export function buildSlackRecentQueries(now = new Date()) {
+// `overrideAfterDate` (a "YYYY-MM-DD" string) is the opt-in widened scope —
+// "I know there's a thread from 3 days ago, catch it this time." Omitted or
+// null, behavior is unchanged: the default trailing-24h window.
+export function buildSlackRecentQueries(now = new Date(), overrideAfterDate = null) {
   // Slack's after: filter is day-granularity, not hour-granularity, so this
   // is an approximate "yesterday onward" window, not a precise trailing 24h
   // one — that imprecision is a known, accepted limitation, not a bug.
   const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  const afterDate = yesterday.toISOString().slice(0, 10);
+  const afterDate = overrideAfterDate || yesterday.toISOString().slice(0, 10);
   return [
     `is:thread to:me after:${afterDate}`,
     `is:thread from:me after:${afterDate}`,

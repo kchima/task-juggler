@@ -12,6 +12,8 @@
   button { font: inherit; cursor: pointer; border: 1px solid #999; background: transparent; color: inherit; border-radius: 6px; padding: 4px 10px; }
   button:hover { background: rgba(128,128,128,0.15); }
   #jg-add-input { font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid #999; background: transparent; color: inherit; flex: 1; min-width: 160px; }
+  #jg-lookback-label { font-size: 12px; opacity: 0.7; white-space: nowrap; }
+  #jg-lookback-input { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid #999; background: transparent; color: inherit; }
   #jg-status { font-size: 12px; opacity: 0.7; }
   .jg-row { display: flex; gap: 8px; align-items: center; padding: 6px 4px; border-bottom: 1px solid rgba(128,128,128,0.25); font-size: 14px; }
   .jg-row-completed { opacity: 0.55; text-decoration: line-through; }
@@ -73,6 +75,8 @@
   <input id="jg-add-input" type="text" placeholder="Add a task, or paste a Slack/Linear/any link…" />
   <button id="jg-add-btn">Add</button>
   <button id="jg-view-toggle">Toggle view</button>
+  <label id="jg-lookback-label" for="jg-lookback-input" title="Widen Slack discovery to catch older threads. Leave blank for the default (last 24h).">Slack since</label>
+  <input type="date" id="jg-lookback-input" />
   <button id="jg-refresh-btn">Refresh</button>
   <button id="jg-probe-btn" title="Call session-listing tools and show exactly what they return">Probe</button>
   <span id="jg-status"></span>
@@ -344,12 +348,15 @@ function stripSlackJsonCodeFences(text) {
 // `is:thread (to:me OR from:me)` silently under-returns. Live-probe-verified:
 // plain single-clause queries (`is:thread to:me`, `is:thread from:me`) work.
 // Two simple queries beat one clever broken one.
-function buildSlackRecentQueries(now = new Date()) {
+// `overrideAfterDate` (a "YYYY-MM-DD" string) is the opt-in widened scope —
+// "I know there's a thread from 3 days ago, catch it this time." Omitted or
+// null, behavior is unchanged: the default trailing-24h window.
+function buildSlackRecentQueries(now = new Date(), overrideAfterDate = null) {
   // Slack's after: filter is day-granularity, not hour-granularity, so this
   // is an approximate "yesterday onward" window, not a precise trailing 24h
   // one — that imprecision is a known, accepted limitation, not a bug.
   const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  const afterDate = yesterday.toISOString().slice(0, 10);
+  const afterDate = overrideAfterDate || yesterday.toISOString().slice(0, 10);
   return [
     `is:thread to:me after:${afterDate}`,
     `is:thread from:me after:${afterDate}`,
@@ -497,6 +504,7 @@ function isUnchangedSinceLastScan(key, signal, watermarks) {
 const STORAGE_KEY = 'task-juggler:tasks:v1';
 const DISMISSED_KEY = 'task-juggler:dismissed:v1';
 const WATERMARKS_KEY = 'task-juggler:watermarks:v1';
+const SLACK_LOOKBACK_KEY = 'task-juggler:slackLookbackDate:v1';
 
 function readJson(storageImpl, key, fallback) {
   const raw = storageImpl.getItem(key);
@@ -583,6 +591,22 @@ function setWatermark(key, signal, storageImpl = globalThis.localStorage) {
   marks[key] = signal;
   storageImpl.setItem(WATERMARKS_KEY, JSON.stringify(marks));
   return marks;
+}
+
+// --- Slack lookback override ----------------------------------------------
+// The default lookback (last 24h) never changes on its own — this is purely
+// an opt-in widening for "I know there's a thread from N days ago, catch it
+// this time." An empty string means "no override, use the default," rather
+// than `removeItem`, so this works against any minimal storage stub that
+// only implements getItem/setItem (the same contract every other function
+// here already assumes).
+
+function loadSlackLookbackDate(storageImpl = globalThis.localStorage) {
+  return storageImpl.getItem(SLACK_LOOKBACK_KEY) || null;
+}
+
+function setSlackLookbackDate(dateStr, storageImpl = globalThis.localStorage) {
+  storageImpl.setItem(SLACK_LOOKBACK_KEY, dateStr || '');
 }
 
 
@@ -1466,7 +1490,8 @@ function createApp({ storage, callMcpTool, askClaude, toolNames, now = () => new
       configNotes.push({ key: 'slack:not-configured', label: 'no search tool configured (slackSearch is unset) — only already-tracked threads are refreshed', outcome: 'not-configured' });
     }
     if (toolNames.slackSearch) {
-      for (const query of buildSlackRecentQueries(now())) {
+      const lookbackOverride = loadSlackLookbackDate(storage);
+      for (const query of buildSlackRecentQueries(now(), lookbackOverride)) {
         try {
           const searchResult = await callMcpTool(toolNames.slackSearch, { query, limit: 20 });
           const unwrapped = unwrapMcpResult(searchResult);
@@ -1720,6 +1745,8 @@ function createApp({ storage, callMcpTool, askClaude, toolNames, now = () => new
 
   return {
     getTasks, refreshAll, refreshOne, discoverNewTasks, runSlackTriage, probeSessionTools,
+    getSlackLookbackDate: () => loadSlackLookbackDate(storage),
+    setSlackLookbackDate: (dateStr) => setSlackLookbackDate(dateStr, storage),
     addManualTask, addByLink, cycleStatusManual, reopen, remove, undismissAll,
   };
 }
@@ -1872,6 +1899,17 @@ function mountApp(doc, app, options = {}) {
     cardQueue = [];
     cardIndex = 0;
     render();
+  });
+
+  // Purely a stored preference — no bridge call involved, so this stays
+  // usable even offline. Saved immediately on change; takes effect on the
+  // next refresh rather than triggering one itself, so picking a date isn't
+  // a surprise network action.
+  const lookbackInput = doc.getElementById('jg-lookback-input');
+  lookbackInput.max = new Date().toISOString().slice(0, 10); // picking a future date makes no sense
+  lookbackInput.value = app.getSlackLookbackDate() ?? '';
+  lookbackInput.addEventListener('change', () => {
+    app.setSlackLookbackDate(lookbackInput.value);
   });
 
   if (autoRefreshMs) {
