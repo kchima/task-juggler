@@ -36,26 +36,54 @@ instance-specific prefixes (e.g. `mcp__<uuid>__slack_read_thread`):
   because a pasted Linear URL's workspace slug (e.g. `acme`) and the team name
   from `list_teams` (e.g. `Acme`) won't always share casing — you don't need to
   normalize this yourself, just pass the label through as captured.
-- **Claude Desktop / Cowork sessions:** which server exists depends on the
-  host, and they are NOT interchangeable. Claude Code exposes
-  `ccd_session_mgmt`, whose `list_sessions` returns a real array of
-  `{ sessionId, title, cwd, isArchived, isRunning, lastActivityAt }` (verified
-  live) with `list_events` for the transcript tail. Cowork has been observed
-  exposing `session_info` instead, which returns **prose**, not JSON, and has
-  no `isArchived`/`lastActivityAt` at all — so the staleness filtering the
-  code does cannot work against it. Record whichever exists as `sessionList` /
-  `sessionEvents`, and don't assume the shape: use the artifact's **Probe**
-  button, which calls each candidate and reports the literal response.
+- **Claude Desktop / Cowork sessions — do this from CHAT, not the artifact.**
+  Which server exists depends on the host, and they are NOT interchangeable.
+  Claude Code exposes `ccd_session_mgmt`, whose `list_sessions` returns a real
+  array of `{ sessionId, title, cwd, isArchived, isRunning, lastActivityAt }`
+  (verified live) with `list_events` for the transcript tail. Cowork exposes
+  `session_info` instead — schema confirmed live from its own tool
+  definition, one optional param: `{ limit: number }` (default 20, most
+  recent first). Its response is **prose**, not JSON:
+  ```
+  Sessions (N of TOTAL, most recent first...)
+    - <sessionId> "<title>" (<status>, cwd: <path>, is_child: <bool>)
+    ...
+  ```
+  No `isArchived`/`lastActivityAt` anywhere — there is no timestamp field at
+  all, so staleness has to come from "most recent first" ordering plus a
+  count cutoff, not a date comparison. `read_transcript` is presumably the
+  tail-reading counterpart, but its shape is NOT verified — probe it the same
+  way before writing anything against it.
 
-  **The `mcp_tools` allowlist is a hard gate, and it is the most likely reason
-  this source is dead.** A tool absent from the allowlist declared at
-  `create_artifact` time is refused before the call happens, with
+  **The critical finding: `session_info__list_sessions` works fine from chat
+  and fails from inside the artifact, with the exact same arguments.** Called
+  from chat with `{ limit: 3 }`, it returns real session data. Called from
+  inside the artifact via `callMcpTool` with the identical arguments, it
+  returns `Tool call failed: 400` — a bare, contentless refusal, not the
+  labeled `"...not in this artifact's mcp_tools allowlist"` message a genuine
+  allowlist rejection gives (see below). Since every other source (Slack,
+  Linear, Todoist) calls tools from inside this same artifact successfully,
+  this isn't a general sandbox limitation — it looks like a deliberate,
+  tool-specific restriction on enumerating a user's full cross-session list
+  from a less-trusted artifact context, which makes sense: that's a much
+  broader disclosure surface (every session title and working directory on
+  the user's machine) than one Slack workspace or Linear project. Don't spend
+  time trying to route around this from the artifact side — **Claude session
+  discovery has to run in chat**, via the deep-scan flow below, and inject
+  results as seed tasks the same way add-by-link already does. The artifact's
+  own `discoverClaudeSessionCandidates` (`src/app.js`) should stay disabled;
+  this isn't a bug in it, it's a platform boundary outside its reach.
+
+  **The `mcp_tools` allowlist is a separate, distinct hard gate.** A tool
+  absent from the allowlist declared at `create_artifact` time is refused
+  before the call happens, with
   `Tool "<name>" is not in this artifact's mcp_tools allowlist.` — verified
-  from inside a deployed artifact. Retrying with different arguments will
-  never help; the name has to be added to `mcp_tools`. This is distinct from
-  a `Tool call failed: 400`, which means the tool WAS reachable and rejected
-  the arguments instead. The Probe distinguishes these two and sweeps a few
-  argument shapes automatically.
+  from inside a deployed artifact. Retrying with different arguments never
+  helps there either; the name has to be added to `mcp_tools`. Tell the two
+  apart by the message: a labeled allowlist rejection names the allowlist
+  explicitly, the artifact-scoping restriction above does not. The **Probe**
+  button in the artifact distinguishes these automatically and sweeps a few
+  argument shapes, which is how the finding above was confirmed.
 
 ## Create or repair the artifact
 
