@@ -13,7 +13,7 @@
     MOCK_CCD_SESSION, MOCK_CCD_SESSION_TAIL,
   } from './mock-fixtures.js';
 
-  const state = { slackVersion: 1, breakLinearGlobex: false };
+  const state = { slackVersion: 1, breakLinearGlobex: false, breakSlackAskClaude: false };
   window.__JUGGLER_TOOL_NAMES__ = MOCK_TOOL_NAMES;
 
   window.cowork = {
@@ -81,6 +81,19 @@
     },
     async askClaude(prompt) {
       console.log('[mock askClaude]', prompt.slice(0, 120) + '…');
+      // Reproduces the real production failure verbatim: a batch Slack
+      // classification call whose "prompt" argument the Cowork bridge
+      // rejects outright, thrown (not returned) from askClaude. Before the
+      // fix, this was unguarded and propagated out through Promise.all in
+      // main.js, wiping out Linear/Todoist/session results from the SAME
+      // refresh cycle. After the fix it should surface only in the errors
+      // dropdown, with everything else still populating normally.
+      if (state.breakSlackAskClaude && prompt.includes('triaging a batch of Slack threads')) {
+        throw new Error(
+          'Error invoking remote method \'$eipc_message$_699a1464-945b-4143-a09c-275519ade04d_$_claude.coworkArtifact_$_CoworkArtifactBridge_$_askClaude\': '
+          + 'Error: Argument "prompt" at position 0 to method "askClaude" in interface "CoworkArtifactBridge" failed to pass validation'
+        );
+      }
       if (prompt.includes('triaging a batch of Slack threads')) {
         const keys = [...prompt.matchAll(/--- Thread (\S+) ---/g)].map((m) => m[1]);
         const verdicts = keys.map((threadKey) => (
@@ -120,6 +133,7 @@
   // resilience path and the errors dropdown without touching the other
   // sources.
   window.__jugglerBreakLinearGlobex = () => { state.breakLinearGlobex = true; };
+  window.__jugglerBreakSlackAskClaude = () => { state.breakSlackAskClaude = true; };
 
   window.__jugglerErrors = [];
   window.addEventListener('error', (e) => {

@@ -712,6 +712,77 @@ describe('createApp resilience — one failing connector must not block the othe
     expect(app.getTasks().find((t) => t.id === 'tracked-good').summary).toBe('still open');
     expect(app.getTasks().find((t) => t.id === 'tracked-bad').summary).toBe(''); // untouched, not corrupted
   });
+
+  // Real production failure: "Error invoking remote method ...: Error:
+  // Argument "prompt" at position 0 to method "askClaude" ... failed to pass
+  // validation" — thrown by the batch classification call, which had no
+  // try/catch at all, so it propagated straight through Promise.all in
+  // main.js and wiped out whatever Linear/Todoist/session results had
+  // already succeeded in the same refresh cycle.
+  const REAL_VALIDATION_ERROR = new Error(
+    'Error invoking remote method \'$eipc_message$...$_askClaude\': Error: Argument "prompt" at position 0 to method "askClaude" in interface "CoworkArtifactBridge" failed to pass validation'
+  );
+
+  it('a rejected batch askClaude call does not throw out of runSlackTriage, and is reported as an error, not a silent zero', async () => {
+    const twoThreadSearchText = [
+      'Channel: #engineering (ID: C01EXAMPLE1)',
+      'Permalink: [link](https://acme.slack.com/archives/C01EXAMPLE1/p1784833812477119?thread_ts=1784829904.373009&cid=C01EXAMPLE1)',
+      'Channel: #eng2 (ID: C02EXAMPLE2)',
+      'Permalink: [link](https://acme.slack.com/archives/C02EXAMPLE2/p1784900000100000?thread_ts=1784900000.100000&cid=C02EXAMPLE2)',
+    ].join('\n');
+    const callMcpTool = vi.fn(async (name) => {
+      if (name === TOOL_NAMES.slackSearch) return { content: [{ text: twoThreadSearchText }], isError: false };
+      if (name === TOOL_NAMES.slackReadThread) {
+        return { content: [{ text: JSON.stringify({ messages: slackThread.rawText, pagination_info: slackThread.paginationInfo }) }], isError: false };
+      }
+      throw new Error(`unexpected tool call: ${name}`);
+    });
+    // Fails no matter how the batch is split — simulates a validator
+    // rejection unrelated to size, isolating down to per-thread errors.
+    const askClaude = vi.fn().mockRejectedValue(REAL_VALIDATION_ERROR);
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
+
+    // The assertion IS that this resolves at all — the real bug threw out of
+    // runSlackTriage and up through main.js's Promise.all.
+    const result = await app.runSlackTriage({ force: true });
+    expect(result.added).toBe(0);
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(result.errors[0]).toContain('Slack classification');
+    expect(result.errors[0]).toContain('failed to pass validation');
+  });
+
+  it('recovers by halving the batch when the combined prompt fails but a smaller one would succeed (size-triggered failure)', async () => {
+    const twoThreadSearchText = [
+      'Channel: #engineering (ID: C01EXAMPLE1)',
+      'Permalink: [link](https://acme.slack.com/archives/C01EXAMPLE1/p1784833812477119?thread_ts=1784829904.373009&cid=C01EXAMPLE1)',
+      'Channel: #eng2 (ID: C02EXAMPLE2)',
+      'Permalink: [link](https://acme.slack.com/archives/C02EXAMPLE2/p1784900000100000?thread_ts=1784900000.100000&cid=C02EXAMPLE2)',
+    ].join('\n');
+    const callMcpTool = vi.fn(async (name) => {
+      if (name === TOOL_NAMES.slackSearch) return { content: [{ text: twoThreadSearchText }], isError: false };
+      if (name === TOOL_NAMES.slackReadThread) {
+        return { content: [{ text: JSON.stringify({ messages: slackThread.rawText, pagination_info: slackThread.paginationInfo }) }], isError: false };
+      }
+      throw new Error(`unexpected tool call: ${name}`);
+    });
+    // Only the combined 2-thread prompt fails; either thread alone succeeds
+    // — exactly what an oversized-combined-prompt failure looks like.
+    const askClaude = vi.fn(async (prompt) => {
+      const threadCount = (prompt.match(/--- Thread /g) || []).length;
+      if (threadCount > 1) throw REAL_VALIDATION_ERROR;
+      const key = prompt.match(/--- Thread (\S+) ---/)[1];
+      return JSON.stringify([{
+        threadKey: key, isOngoing: true, ballInUsersCourt: true,
+        waitingOn: 'user', status: 'in_progress', summary: 'recovered via smaller batch', reason: 'x',
+      }]);
+    });
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
+    const result = await app.runSlackTriage({ force: true });
+
+    expect(askClaude).toHaveBeenCalledTimes(3); // 1 combined (fails) + 2 individual retries (succeed)
+    expect(result.added).toBe(2); // both threads still classified correctly
+    expect(result.errors).toEqual([]); // the recovered batch reports no error — only a true dead end would
+  });
 });
 
 // Built directly from a real probe run inside a deployed Cowork artifact,

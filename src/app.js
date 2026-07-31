@@ -56,6 +56,38 @@ function canonicalize(task, rawContext) {
   return '';
 }
 
+// A real bridge failure ("Argument 'prompt' ... failed to pass validation")
+// was observed on the batch Slack classification call. Its most likely
+// cause is size — the batch concatenates every changed thread's full raw
+// text into one prompt with no cap — but there's no confirmed limit to
+// guess at, and it could just as easily be one thread's content the
+// validator rejects regardless of size. Rather than pick an arbitrary
+// character budget, back off: on failure, split the batch in half and
+// retry each half independently. That survives a size-triggered failure
+// without needing to know the real limit, and correctly isolates a single
+// bad thread (retrying down to size 1 and still failing) as a per-thread
+// error instead of taking the whole scan down with it.
+async function classifySlackBatch(entries, askClaude) {
+  if (entries.length === 0) return { verdicts: new Map(), errors: [] };
+  try {
+    const raw = await askClaude(
+      buildSlackBatchPrompt(entries.map((e) => ({ threadKey: e.key, rawText: e.rawText }))),
+      []
+    );
+    return { verdicts: parseSlackBatchVerdicts(raw) ?? new Map(), errors: [] };
+  } catch (err) {
+    if (entries.length === 1) {
+      return { verdicts: new Map(), errors: [`Slack classification (${entries[0].key}): ${err?.message ?? 'AI call failed'}`] };
+    }
+    const mid = Math.ceil(entries.length / 2);
+    const [a, b] = await Promise.all([
+      classifySlackBatch(entries.slice(0, mid), askClaude),
+      classifySlackBatch(entries.slice(mid), askClaude),
+    ]);
+    return { verdicts: new Map([...a.verdicts, ...b.verdicts]), errors: [...a.errors, ...b.errors] };
+  }
+}
+
 async function mapWithConcurrency(items, limit, fn) {
   const results = new Array(items.length);
   let next = 0;
@@ -226,7 +258,7 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
   async function slackTriageForRefs(refsByKey, trackedByKey) {
     const scanned = refsByKey.size;
     if (scanned === 0) {
-      return { scanned: 0, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, newTasks: [], detected: [] };
+      return { scanned: 0, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, newTasks: [], detected: [], errors: [] };
     }
 
     const fetched = await mapWithConcurrency([...refsByKey.entries()], CONCURRENCY, async ([key, ref]) => {
@@ -268,14 +300,10 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
     }
 
     if (toClassify.length === 0) {
-      return { scanned, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, newTasks: [], detected: [...detected.values()] };
+      return { scanned, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, newTasks: [], detected: [...detected.values()], errors: [] };
     }
 
-    const rawVerdicts = await askClaude(
-      buildSlackBatchPrompt(toClassify.map((e) => ({ threadKey: e.key, rawText: e.rawText }))),
-      []
-    );
-    const verdicts = parseSlackBatchVerdicts(rawVerdicts);
+    const { verdicts, errors: classifyErrors } = await classifySlackBatch(toClassify, askClaude);
 
     let ongoing = 0, updated = 0, added = 0, skippedResolved = 0, unparsed = 0;
     const newTasks = [];
@@ -330,7 +358,7 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
       setWatermark(entry.key, signal, storage);
     }
 
-    return { scanned, ongoing, updated, added, skippedResolved, unparsed, aiCalled: true, newTasks, detected: [...detected.values()] };
+    return { scanned, ongoing, updated, added, skippedResolved, unparsed, aiCalled: true, newTasks, detected: [...detected.values()], errors: classifyErrors };
   }
 
   // Slack discovery + refresh, batched: one AI call classifies every thread
@@ -390,14 +418,19 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
     }
     for (const key of dismissedKeys) refsByKey.delete(key);
 
-    const { newTasks, detected, ...summary } = await slackTriageForRefs(refsByKey, trackedByKey);
+    const { newTasks, detected, errors: classifyErrors, ...summary } = await slackTriageForRefs(refsByKey, trackedByKey);
 
     if (newTasks.length) {
       const existing = getTasks();
       saveTasks(mergeSeedTasks(existing, newTasks, [...dismissedKeys]), storage);
     }
 
-    return { skipped: false, ...summary, detected: [...configNotes, ...detected], unreadCheckAvailable: false, errors };
+    return {
+      skipped: false, ...summary,
+      detected: [...configNotes, ...detected],
+      unreadCheckAvailable: false,
+      errors: [...errors, ...classifyErrors],
+    };
   }
 
   // Session-listing tools seen in the wild, tried in order. Claude Code
