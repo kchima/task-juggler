@@ -57,6 +57,9 @@
   .jg-probe-body { white-space: pre-wrap; word-break: break-word; margin: 4px 0 0;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
     background: rgba(128,128,128,0.12); padding: 8px; border-radius: 6px; max-height: 340px; overflow: auto; }
+  #jg-debug-fallback { width: 100%; box-sizing: border-box; min-height: 160px; margin-top: 8px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+    background: rgba(128,128,128,0.12); color: inherit; border: 1px solid #999; border-radius: 6px; padding: 8px; }
 </style>
 </head>
 <body>
@@ -79,12 +82,14 @@
   <input type="date" id="jg-lookback-input" />
   <button id="jg-refresh-btn">Refresh</button>
   <button id="jg-probe-btn" title="Call session-listing tools and show exactly what they return">Probe</button>
+  <button id="jg-copy-debug-btn" title="Copy status, errors, detected candidates, and the last probe result — for pasting back when reporting an issue">Copy Debug Info</button>
   <span id="jg-status"></span>
 </header>
 <details id="jg-probe" hidden>
   <summary></summary>
   <ul></ul>
 </details>
+<textarea id="jg-debug-fallback" readonly hidden></textarea>
 <div id="jg-list"></div>
 <div id="jg-card" hidden></div>
 <script id="juggler-seed" type="application/json"></script>

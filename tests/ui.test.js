@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { nextStatus, renderList, renderCard, renderErrors, renderCandidates, renderProbe } from '../src/ui.js';
+import { nextStatus, renderList, renderCard, renderErrors, renderCandidates, renderProbe, buildDebugSnapshot } from '../src/ui.js';
 
 function noopHandlers() {
   return {
@@ -213,6 +213,67 @@ describe('renderProbe', () => {
     const body = container.querySelector('.jg-probe-body').textContent;
     expect(body).toContain('envelope keys:  ["sessions","pagination_info"]');
     expect(body).toContain('string-valued:  ["sessions"]');
+  });
+});
+
+describe('buildDebugSnapshot', () => {
+  function fullFixture() {
+    document.body.innerHTML = `
+      <span id="jg-status">Refreshed (1 AI call, 3 new)</span>
+      <input type="date" id="jg-lookback-input" value="2026-07-20" />
+      <details id="jg-errors"><summary>⚠ 1 issue</summary><ul><li>Linear (Acme): connector error</li></ul></details>
+      <details id="jg-candidates">
+        <summary>Detected this scan (2)</summary>
+        <details data-group="slack"><summary>Slack (1)</summary><ul><li>[added] Priya asked Dana to review pricing copy</li></ul></details>
+        <details data-group="claude"><summary>Claude (0)</summary><ul><li class="jg-candidate-empty">none this scan</li></ul></details>
+        <details data-group="linear"><summary>Linear (1)</summary><ul><li>[already-tracked] [Acme] Fix flaky checkout retry logic</li></ul></details>
+      </details>
+      <details id="jg-probe"><summary>Connector probe — 1/2 calls succeeded</summary>
+        <ul><li>✓ mcp__x__list_sessions {"limit":3}\ntool succeeded</li></ul>
+      </details>
+    `;
+    return document;
+  }
+
+  it('includes the status line and lookback value verbatim', () => {
+    const text = buildDebugSnapshot(fullFixture());
+    expect(text).toContain('Status: Refreshed (1 AI call, 3 new)');
+    expect(text).toContain('Slack lookback override: 2026-07-20');
+  });
+
+  it('includes every error message', () => {
+    const text = buildDebugSnapshot(fullFixture());
+    expect(text).toContain('Linear (Acme): connector error');
+  });
+
+  it('includes every candidate group, even the empty one', () => {
+    const text = buildDebugSnapshot(fullFixture());
+    expect(text).toContain('[added] Priya asked Dana to review pricing copy');
+    expect(text).toContain('none this scan');
+    expect(text).toContain('[already-tracked] [Acme] Fix flaky checkout retry logic');
+  });
+
+  it('includes the probe results when the probe panel is visible', () => {
+    const text = buildDebugSnapshot(fullFixture());
+    expect(text).toContain('mcp__x__list_sessions');
+  });
+
+  it('reports "(none)" for errors and "(not run)" for probe when both are in their default hidden state', () => {
+    document.body.innerHTML = `
+      <span id="jg-status"></span>
+      <input type="date" id="jg-lookback-input" />
+      <details id="jg-errors" hidden><summary></summary><ul></ul></details>
+      <details id="jg-candidates"><summary></summary>
+        <details data-group="slack"><summary></summary><ul></ul></details>
+        <details data-group="claude"><summary></summary><ul></ul></details>
+        <details data-group="linear"><summary></summary><ul></ul></details>
+      </details>
+      <details id="jg-probe" hidden><summary></summary><ul></ul></details>
+    `;
+    const text = buildDebugSnapshot(document);
+    expect(text).toContain('(none)');
+    expect(text).toContain('(default — last 24h)');
+    expect(text).toMatch(/not run this session/);
   });
 });
 

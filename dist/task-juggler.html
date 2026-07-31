@@ -57,6 +57,9 @@
   .jg-probe-body { white-space: pre-wrap; word-break: break-word; margin: 4px 0 0;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
     background: rgba(128,128,128,0.12); padding: 8px; border-radius: 6px; max-height: 340px; overflow: auto; }
+  #jg-debug-fallback { width: 100%; box-sizing: border-box; min-height: 160px; margin-top: 8px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+    background: rgba(128,128,128,0.12); color: inherit; border: 1px solid #999; border-radius: 6px; padding: 8px; }
 </style>
 </head>
 <body>
@@ -79,12 +82,14 @@
   <input type="date" id="jg-lookback-input" />
   <button id="jg-refresh-btn">Refresh</button>
   <button id="jg-probe-btn" title="Call session-listing tools and show exactly what they return">Probe</button>
+  <button id="jg-copy-debug-btn" title="Copy status, errors, detected candidates, and the last probe result — for pasting back when reporting an issue">Copy Debug Info</button>
   <span id="jg-status"></span>
 </header>
 <details id="jg-probe" hidden>
   <summary></summary>
   <ul></ul>
 </details>
+<textarea id="jg-debug-fallback" readonly hidden></textarea>
 <div id="jg-list"></div>
 <div id="jg-card" hidden></div>
 <script id="juggler-seed" type="application/json"></script>
@@ -1104,6 +1109,51 @@ function renderCard(container, task, handlers) {
   container.appendChild(card);
 }
 
+// One paste-back-able report instead of "screenshot the errors dropdown,
+// then the candidates panel, then the probe panel, then tell me the date
+// field's value" — reads straight off the DOM, so it always matches exactly
+// what's currently on screen rather than a separately-tracked copy of it.
+function buildDebugSnapshot(doc) {
+  const lines = [`Task Juggler debug snapshot — ${new Date().toISOString()}`, ''];
+
+  lines.push(`Status: ${doc.getElementById('jg-status')?.textContent || '(empty)'}`);
+  lines.push(`Slack lookback override: ${doc.getElementById('jg-lookback-input')?.value || '(default — last 24h)'}`);
+  lines.push('');
+
+  lines.push('--- Errors ---');
+  const errorsEl = doc.getElementById('jg-errors');
+  if (!errorsEl || errorsEl.hidden) {
+    lines.push('(none)');
+  } else {
+    for (const li of errorsEl.querySelectorAll('li')) lines.push(`- ${li.textContent.trim()}`);
+  }
+  lines.push('');
+
+  lines.push('--- Detected this scan ---');
+  const candidatesEl = doc.getElementById('jg-candidates');
+  if (candidatesEl) {
+    for (const group of candidatesEl.querySelectorAll('[data-group]')) {
+      lines.push(`${group.querySelector('summary')?.textContent || group.dataset.group}:`);
+      for (const li of group.querySelectorAll('li')) lines.push(`  - ${li.textContent.trim()}`);
+    }
+  }
+  lines.push('');
+
+  lines.push('--- Last connector probe ---');
+  const probeEl = doc.getElementById('jg-probe');
+  if (!probeEl || probeEl.hidden) {
+    lines.push('(not run this session — click Probe first if relevant)');
+  } else {
+    // Preserved verbatim, not trimmed to one line — the probe's whole point
+    // is the literal formatting of a raw connector response.
+    for (const li of probeEl.querySelectorAll(':scope > ul > li')) {
+      lines.push(`* ${li.textContent.trim()}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
 
 // --- app.js ---
 
@@ -1910,6 +1960,30 @@ function mountApp(doc, app, options = {}) {
   lookbackInput.value = app.getSlackLookbackDate() ?? '';
   lookbackInput.addEventListener('change', () => {
     app.setSlackLookbackDate(lookbackInput.value);
+  });
+
+  // One click instead of "screenshot the errors dropdown, then the
+  // candidates panel, then the probe panel, then tell me the date field's
+  // value" every time something needs reporting. Clipboard access from
+  // inside an artifact iframe is unverified — the session_info restriction
+  // already showed the sandbox can behave unexpectedly — so this degrades
+  // to a visible, selectable textarea rather than assuming writeText works.
+  doc.getElementById('jg-copy-debug-btn').addEventListener('click', async () => {
+    const text = buildDebugSnapshot(doc);
+    const statusEl = doc.getElementById('jg-status');
+    const fallback = doc.getElementById('jg-debug-fallback');
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable');
+      await navigator.clipboard.writeText(text);
+      fallback.hidden = true;
+      statusEl.textContent = 'Debug info copied to clipboard';
+    } catch {
+      fallback.value = text;
+      fallback.hidden = false;
+      fallback.focus();
+      fallback.select();
+      statusEl.textContent = 'Clipboard unavailable — select the text below and copy it manually';
+    }
   });
 
   if (autoRefreshMs) {

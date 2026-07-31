@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mountApp } from '../src/main.js';
 
 function domFixture() {
@@ -17,8 +17,10 @@ function domFixture() {
     <input type="date" id="jg-lookback-input" />
     <button id="jg-refresh-btn"></button>
     <button id="jg-probe-btn"></button>
+    <button id="jg-copy-debug-btn"></button>
     <span id="jg-status"></span>
     <details id="jg-probe" hidden><summary></summary><ul></ul></details>
+    <textarea id="jg-debug-fallback" readonly hidden></textarea>
     <div id="jg-list"></div>
     <div id="jg-card" hidden></div>
   `;
@@ -289,6 +291,84 @@ describe('mountApp', () => {
     mountApp(document, app, { offline: true });
     const input = document.getElementById('jg-lookback-input');
     expect(input.max).toBe(new Date().toISOString().slice(0, 10));
+  });
+
+  describe('Copy Debug Info', () => {
+    afterEach(() => {
+      delete navigator.clipboard;
+    });
+
+    it('copies the snapshot to the clipboard when the API is available, and never shows the fallback textarea', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      const app = fakeApp({ getSlackLookbackDate: vi.fn().mockReturnValue('2026-07-20') });
+      mountApp(document, app);
+
+      document.getElementById('jg-copy-debug-btn').click();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(writeText).toHaveBeenCalledTimes(1);
+      expect(writeText.mock.calls[0][0]).toContain('Slack lookback override: 2026-07-20');
+      expect(document.getElementById('jg-status').textContent).toContain('copied to clipboard');
+      expect(document.getElementById('jg-debug-fallback').hidden).toBe(true);
+    });
+
+    it('falls back to a visible, selected textarea when the clipboard API is unavailable — the artifact sandbox is unverified, not assumed to work', async () => {
+      // No navigator.clipboard defined at all — jsdom's default, and exactly
+      // what an artifact iframe blocking clipboard access would look like.
+      const app = fakeApp();
+      mountApp(document, app);
+
+      document.getElementById('jg-copy-debug-btn').click();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const fallback = document.getElementById('jg-debug-fallback');
+      expect(fallback.hidden).toBe(false);
+      expect(fallback.value).toContain('Task Juggler debug snapshot');
+      expect(document.getElementById('jg-status').textContent).toContain('Clipboard unavailable');
+    });
+
+    it('falls back the same way when the clipboard API exists but writeText itself rejects', async () => {
+      const writeText = vi.fn().mockRejectedValue(new Error('permission denied'));
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      const app = fakeApp();
+      mountApp(document, app);
+
+      document.getElementById('jg-copy-debug-btn').click();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(document.getElementById('jg-debug-fallback').hidden).toBe(false);
+    });
+
+    it('includes the errors dropdown, candidates panel, and probe results verbatim in the snapshot', async () => {
+      const app = fakeApp({
+        discoverNewTasks: vi.fn().mockResolvedValue({ added: 0, errors: ['Linear (Acme): connector error'] }),
+        probeSessionTools: vi.fn().mockResolvedValue([
+          { name: 'mcp__session_info__list_sessions', args: {}, outcome: 'tool-error', error: 'Tool call failed: 400 ', shape: {
+            isError: true, hasStructuredContent: false, contentTextType: 'string',
+            unwrappedType: 'null', unwrappedKeys: null, stringValuedKeys: null, payloadPreviews: [], rawJson: '{}',
+          } },
+        ]),
+      });
+      mountApp(document, app);
+      document.getElementById('jg-refresh-btn').click();
+      await Promise.resolve();
+      await Promise.resolve();
+      document.getElementById('jg-probe-btn').click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      document.getElementById('jg-copy-debug-btn').click();
+      await Promise.resolve();
+
+      const fallback = document.getElementById('jg-debug-fallback');
+      expect(fallback.value).toContain('Linear (Acme): connector error');
+      expect(fallback.value).toContain('tool was reached but refused the call');
+    });
   });
 
   it('in offline mode, refresh does not call the app and says so instead of throwing', async () => {

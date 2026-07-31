@@ -279,3 +279,48 @@ export function renderCard(container, task, handlers) {
 
   container.appendChild(card);
 }
+
+// One paste-back-able report instead of "screenshot the errors dropdown,
+// then the candidates panel, then the probe panel, then tell me the date
+// field's value" — reads straight off the DOM, so it always matches exactly
+// what's currently on screen rather than a separately-tracked copy of it.
+export function buildDebugSnapshot(doc) {
+  const lines = [`Task Juggler debug snapshot — ${new Date().toISOString()}`, ''];
+
+  lines.push(`Status: ${doc.getElementById('jg-status')?.textContent || '(empty)'}`);
+  lines.push(`Slack lookback override: ${doc.getElementById('jg-lookback-input')?.value || '(default — last 24h)'}`);
+  lines.push('');
+
+  lines.push('--- Errors ---');
+  const errorsEl = doc.getElementById('jg-errors');
+  if (!errorsEl || errorsEl.hidden) {
+    lines.push('(none)');
+  } else {
+    for (const li of errorsEl.querySelectorAll('li')) lines.push(`- ${li.textContent.trim()}`);
+  }
+  lines.push('');
+
+  lines.push('--- Detected this scan ---');
+  const candidatesEl = doc.getElementById('jg-candidates');
+  if (candidatesEl) {
+    for (const group of candidatesEl.querySelectorAll('[data-group]')) {
+      lines.push(`${group.querySelector('summary')?.textContent || group.dataset.group}:`);
+      for (const li of group.querySelectorAll('li')) lines.push(`  - ${li.textContent.trim()}`);
+    }
+  }
+  lines.push('');
+
+  lines.push('--- Last connector probe ---');
+  const probeEl = doc.getElementById('jg-probe');
+  if (!probeEl || probeEl.hidden) {
+    lines.push('(not run this session — click Probe first if relevant)');
+  } else {
+    // Preserved verbatim, not trimmed to one line — the probe's whole point
+    // is the literal formatting of a raw connector response.
+    for (const li of probeEl.querySelectorAll(':scope > ul > li')) {
+      lines.push(`* ${li.textContent.trim()}`);
+    }
+  }
+
+  return lines.join('\n');
+}

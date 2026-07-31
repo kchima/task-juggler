@@ -1,5 +1,5 @@
 import { createApp } from './app.js';
-import { renderList, renderCard, nextStatus, renderErrors, renderCandidates, renderProbe } from './ui.js';
+import { renderList, renderCard, nextStatus, renderErrors, renderCandidates, renderProbe, buildDebugSnapshot } from './ui.js';
 import { mergeSeedTasks, readSeedFromDocument } from './seedMerge.js';
 import { loadTasks, saveTasks } from './storage.js';
 import { sortTasks } from './scoring.js';
@@ -155,6 +155,30 @@ export function mountApp(doc, app, options = {}) {
   lookbackInput.value = app.getSlackLookbackDate() ?? '';
   lookbackInput.addEventListener('change', () => {
     app.setSlackLookbackDate(lookbackInput.value);
+  });
+
+  // One click instead of "screenshot the errors dropdown, then the
+  // candidates panel, then the probe panel, then tell me the date field's
+  // value" every time something needs reporting. Clipboard access from
+  // inside an artifact iframe is unverified — the session_info restriction
+  // already showed the sandbox can behave unexpectedly — so this degrades
+  // to a visible, selectable textarea rather than assuming writeText works.
+  doc.getElementById('jg-copy-debug-btn').addEventListener('click', async () => {
+    const text = buildDebugSnapshot(doc);
+    const statusEl = doc.getElementById('jg-status');
+    const fallback = doc.getElementById('jg-debug-fallback');
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable');
+      await navigator.clipboard.writeText(text);
+      fallback.hidden = true;
+      statusEl.textContent = 'Debug info copied to clipboard';
+    } catch {
+      fallback.value = text;
+      fallback.hidden = false;
+      fallback.focus();
+      fallback.select();
+      statusEl.textContent = 'Clipboard unavailable — select the text below and copy it manually';
+    }
   });
 
   if (autoRefreshMs) {
