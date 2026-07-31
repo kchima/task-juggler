@@ -44,19 +44,6 @@
   #jg-candidates ul { margin: 4px 0 0; padding-left: 18px; }
   #jg-candidates li { margin-bottom: 2px; }
   #jg-candidates li.jg-candidate-empty { opacity: 0.6; font-style: italic; }
-  #jg-probe { font-size: 12px; margin-bottom: 10px; }
-  #jg-probe > summary { cursor: pointer; user-select: none; }
-  #jg-probe ul { margin: 6px 0 0; padding-left: 18px; }
-  #jg-probe li { margin-bottom: 10px; }
-  .jg-probe-name { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  /* pre-wrap, not the default pre: the literal indentation and line breaks
-     of a prose-formatted response ARE the thing being inspected here, but it
-     still has to wrap rather than force the page to scroll sideways. */
-  .jg-probe-sublabel { margin-top: 6px; opacity: 0.7; font-size: 11px; }
-  .jg-probe-literal { border-left: 3px solid rgba(128,128,128,0.5); }
-  .jg-probe-body { white-space: pre-wrap; word-break: break-word; margin: 4px 0 0;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
-    background: rgba(128,128,128,0.12); padding: 8px; border-radius: 6px; max-height: 340px; overflow: auto; }
   #jg-debug-fallback { width: 100%; box-sizing: border-box; min-height: 160px; margin-top: 8px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
     background: rgba(128,128,128,0.12); color: inherit; border: 1px solid #999; border-radius: 6px; padding: 8px; }
@@ -81,14 +68,9 @@
   <label id="jg-lookback-label" for="jg-lookback-input" title="Widen Slack discovery to catch older threads. Leave blank for the default (last 24h).">Slack since</label>
   <input type="date" id="jg-lookback-input" />
   <button id="jg-refresh-btn">Refresh</button>
-  <button id="jg-probe-btn" title="Call session-listing tools and show exactly what they return">Probe</button>
-  <button id="jg-copy-debug-btn" title="Copy status, errors, detected candidates, and the last probe result — for pasting back when reporting an issue">Copy Debug Info</button>
+  <button id="jg-copy-debug-btn" title="Copy status, errors, and detected candidates — for pasting back when reporting an issue">Copy Debug Info</button>
   <span id="jg-status"></span>
 </header>
-<details id="jg-probe" hidden>
-  <summary></summary>
-  <ul></ul>
-</details>
 <textarea id="jg-debug-fallback" readonly hidden></textarea>
 <div id="jg-list"></div>
 <div id="jg-card" hidden></div>
@@ -432,77 +414,13 @@ function extractSlackThreadRefs(searchResultText) {
   return [...refs.values()];
 }
 
-// --- Claude Desktop (CCD) sessions ---------------------------------------
-// Live-verified shape from mcp__ccd_session_mgmt__list_sessions:
-// { sessionId, title, cwd, isArchived, isRunning, lastActivityAt }
-
-// Sessions the user hasn't touched in a long while aren't "in flight" in any
-// useful sense — this is a short-term workflow surface, not an archive. A
-// cheap deterministic filter here means those never cost an LLM call at all.
-const SESSION_STALE_AFTER_HOURS = 72;
-
-function isCandidateClaudeSession(session, now = new Date()) {
-  if (session.isArchived) return false;
-  if (!session.lastActivityAt) return false;
-  const hoursSince = (now - new Date(session.lastActivityAt)) / (1000 * 60 * 60);
-  return hoursSince <= SESSION_STALE_AFTER_HOURS;
-}
-
-function claudeSessionCandidateToTask(session, judgment) {
-  return {
-    title: session.title,
-    source: 'claude_session',
-    sourceRef: { sessionId: session.sessionId, cwd: session.cwd },
-    summary: judgment?.reason ?? '',
-    waitingOn: judgment?.waitingOn ?? null,
-    ballInUsersCourt: judgment?.waitingOn === 'user',
-  };
-}
-
-function buildSessionJudgmentPrompt(session, transcriptTail) {
-  return [
-    "You are triaging the tail of an AI coding/work session transcript to decide if it's an open loop.",
-    'Respond with STRICT JSON ONLY — no prose, no markdown code fences — matching exactly:',
-    '{"needsAttention": true, "waitingOn": "user|ai|other", "reason": "one short sentence"}',
-    'needsAttention is true only if the work is unfinished AND someone still has to act.',
-    'waitingOn is "user" if the assistant asked a question, requested a decision, or handed a step back to the human;',
-    '"ai" if the assistant was still mid-task; "other" if it is blocked on a third party.',
-    'If the session reads as finished and resolved, needsAttention is false.',
-    `Session title: ${session.title}`,
-    `Transcript tail:\n${transcriptTail}`,
-  ].join('\n');
-}
-
-function parseSessionJudgment(rawText) {
-  try {
-    const parsed = JSON.parse(stripSlackJsonCodeFences(rawText));
-    if (typeof parsed.needsAttention !== 'boolean') return null;
-    const waitingOn = ['user', 'ai', 'other'].includes(parsed.waitingOn) ? parsed.waitingOn : null;
-    return {
-      needsAttention: parsed.needsAttention,
-      waitingOn,
-      reason: typeof parsed.reason === 'string' ? parsed.reason : '',
-    };
-  } catch {
-    return null;
-  }
-}
-
-// --- Watermarks -----------------------------------------------------------
-// The change signal per source: if this string is unchanged since the last
-// scan, nothing about the item has changed, so it must not reach an LLM.
-
-function changeSignalFor(source, item) {
-  if (source === 'claude_session') return `${item.lastActivityAt}`;
-  if (source === 'linear') return `${item.updatedAt}`;
-  if (source === 'slack') return `${item.latestTs ?? item.threadTs}`;
-  if (source === 'todoist') return `${item.dueDate ?? ''}:${item.priority ?? ''}`;
-  return '';
-}
-
-function isUnchangedSinceLastScan(key, signal, watermarks) {
-  return Boolean(signal) && watermarks[key] === signal;
-}
+// Claude Desktop / Cowork session discovery deliberately does NOT live here.
+// A live probe from inside a deployed artifact confirmed session-listing
+// tools are blocked at the artifact-bridge layer (a bare "Tool call failed:
+// 400" for session_info, reachable and correctly configured, with identical
+// arguments that succeed fine from chat) — so that discovery has to run via
+// the juggler skill's chat-driven deep-scan flow instead of from in here.
+// See the "Claude Desktop / Cowork sessions" note in the skill's SKILL.md.
 
 
 // --- storage.js ---
@@ -686,97 +604,6 @@ function slackThreadText(unwrapped) {
   return typeof messages === 'string' ? messages : null;
 }
 
-// --- Connector shape probe ------------------------------------------------
-// Twice now, code has been written against a *description* of an MCP
-// response instead of the response itself, and been subtly wrong both times
-// (the Slack `{messages, pagination_info}` envelope being the expensive
-// one). This reports what a tool ACTUALLY returned, from inside whatever
-// sandbox the artifact is running in — which is also the only place that can
-// answer whether a tool is reachable from an artifact at all, since the
-// host's callMcpTool bridge may expose a narrower allowlist than chat does.
-//
-// Deliberately reports the raw envelope AND what unwrapMcpResult makes of
-// it, because the gap between those two is exactly where the bugs live.
-const PROBE_PREVIEW_LIMIT = 4000;
-
-function summarizeMcpShape(raw) {
-  const unwrapped = unwrapMcpResult(raw);
-  const unwrappedType = unwrapped === null ? 'null' : Array.isArray(unwrapped) ? 'array' : typeof unwrapped;
-  return {
-    isError: Boolean(raw?.isError),
-    hasStructuredContent: raw?.structuredContent !== undefined,
-    contentTextType: typeof raw?.content?.[0]?.text,
-    unwrappedType,
-    // The envelope question, answered directly: if this is an object, these
-    // keys are the candidates for where the real payload lives.
-    unwrappedKeys: unwrappedType === 'object' ? Object.keys(unwrapped) : null,
-    stringValuedKeys: unwrappedType === 'object'
-      ? Object.entries(unwrapped).filter(([, v]) => typeof v === 'string').map(([k]) => k)
-      : null,
-    // The raw dump is JSON, so a prose payload comes out escaped onto one
-    // line ("...\n - id \"title\"..."), which is unreadable for exactly the
-    // case this tool exists to inspect. These are the same strings with
-    // their real line breaks, so the literal format can actually be read.
-    payloadPreviews: stringPayloads(unwrapped),
-    rawJson: safeStringify(raw).slice(0, PROBE_PREVIEW_LIMIT),
-  };
-}
-
-function stringPayloads(unwrapped) {
-  if (typeof unwrapped === 'string') {
-    return [{ key: '(whole response)', text: unwrapped.slice(0, PROBE_PREVIEW_LIMIT) }];
-  }
-  if (unwrapped && typeof unwrapped === 'object' && !Array.isArray(unwrapped)) {
-    return Object.entries(unwrapped)
-      .filter(([, v]) => typeof v === 'string')
-      .map(([key, v]) => ({ key, text: v.slice(0, PROBE_PREVIEW_LIMIT) }));
-  }
-  return [];
-}
-
-function safeStringify(value) {
-  try {
-    return JSON.stringify(value, null, 2) ?? String(value);
-  } catch {
-    return String(value);
-  }
-}
-
-function mcpErrorText(raw) {
-  const text = raw?.content?.[0]?.text;
-  return typeof text === 'string' && text.trim() ? text : 'unknown tool error';
-}
-
-// An artifact declares an `mcp_tools` allowlist when it's created; a tool
-// outside it is refused before the call is even attempted. That's a
-// *configuration* failure with a specific fix (add the name to the
-// allowlist) and no amount of retrying with different arguments will help,
-// which is why it's worth telling apart from every other error.
-function isAllowlistError(text) {
-  return typeof text === 'string' && /allowlist/i.test(text);
-}
-
-// Calls one tool and reports what came back, never throwing. Three outcomes,
-// deliberately distinct: 'unreachable' (the call itself threw — no bridge, no
-// such tool), 'tool-error' (the call returned, but with isError set — the
-// tool was reached and refused), and 'ok'. Collapsing the middle case into
-// "reachable" is exactly the mistake that made a first version of this report
-// two hard failures as successes.
-async function probeTool(callMcpTool, name, args) {
-  try {
-    const raw = await callMcpTool(name, args);
-    const shape = summarizeMcpShape(raw);
-    return {
-      name, args,
-      outcome: shape.isError ? 'tool-error' : 'ok',
-      error: shape.isError ? mcpErrorText(raw) : null,
-      shape,
-    };
-  } catch (err) {
-    return { name, args, outcome: 'unreachable', error: err?.message ?? 'call failed', shape: null };
-  }
-}
-
 function findWorkspacePrefix(linearWorkspaces, workspaceLabel) {
   const target = workspaceLabel.toLowerCase();
   const match = Object.entries(linearWorkspaces ?? {}).find(([label]) => label.toLowerCase() === target);
@@ -892,82 +719,6 @@ function renderCandidateGroup(groupEl, label, items) {
   }
 }
 
-// Renders raw connector-probe output. Everything here is deliberately
-// verbatim and in a <pre>: the whole point is to read the LITERAL response
-// (exact indentation, quoting, line breaks), because a paraphrase of a
-// response shape is what caused the bugs this exists to prevent. Normal HTML
-// rendering would collapse exactly the whitespace we're trying to inspect.
-function renderProbe(container, reports) {
-  const list = container.querySelector('ul');
-  list.innerHTML = '';
-  if (!reports.length) {
-    container.hidden = true;
-    return;
-  }
-  container.hidden = false;
-  const ok = reports.filter((r) => r.outcome === 'ok').length;
-  container.querySelector('summary').textContent = `Connector probe — ${ok}/${reports.length} call${reports.length === 1 ? '' : 's'} succeeded`;
-
-  const ICON = { ok: '✓', 'tool-error': '⚠', unreachable: '✗' };
-
-  for (const report of reports) {
-    const li = document.createElement('li');
-
-    const heading = document.createElement('div');
-    heading.className = 'jg-probe-name';
-    // Args are part of the identity of the attempt: the same name can fail
-    // with one signature and succeed with another, and that difference is
-    // the finding.
-    heading.textContent = `${ICON[report.outcome] ?? '?'} ${report.name}  ${JSON.stringify(report.args)}`;
-    li.appendChild(heading);
-
-    const body = document.createElement('pre');
-    body.className = 'jg-probe-body';
-    body.textContent = report.outcome === 'ok'
-      ? [
-        `unwrapped type: ${report.shape.unwrappedType}`,
-        `envelope keys:  ${report.shape.unwrappedKeys ? JSON.stringify(report.shape.unwrappedKeys) : '(not an object)'}`,
-        `string-valued:  ${report.shape.stringValuedKeys ? JSON.stringify(report.shape.stringValuedKeys) : '(n/a)'}`,
-        `structuredContent: ${report.shape.hasStructuredContent}  content[0].text: ${report.shape.contentTextType}`,
-      ].join('\n')
-      : report.outcome === 'tool-error'
-        ? `tool was reached but refused the call:\n${report.error}`
-        : `call could not be made at all:\n${report.error}`;
-    li.appendChild(body);
-
-    // Each string payload verbatim, with real line breaks — this is the
-    // block to read when the response is prose, since the JSON dump below
-    // escapes exactly the newlines and quoting being inspected.
-    for (const payload of report.shape?.payloadPreviews ?? []) {
-      const label = document.createElement('div');
-      label.className = 'jg-probe-sublabel';
-      label.textContent = `literal payload — ${payload.key}:`;
-      li.appendChild(label);
-
-      const pre = document.createElement('pre');
-      pre.className = 'jg-probe-body jg-probe-literal';
-      pre.textContent = payload.text;
-      li.appendChild(pre);
-    }
-
-    // Shown for tool-errors too, not just successes — a refusal's raw body
-    // often carries the actual reason (an allowlist name, a validation
-    // message) that the summary line alone would lose.
-    if (report.shape) {
-      const label = document.createElement('div');
-      label.className = 'jg-probe-sublabel';
-      label.textContent = 'raw response (JSON-escaped):';
-      li.appendChild(label);
-
-      const pre = document.createElement('pre');
-      pre.className = 'jg-probe-body';
-      pre.textContent = report.shape.rawJson;
-      li.appendChild(pre);
-    }
-
-    list.appendChild(li);
-  }
-}
 
 function nextStatus(status) {
   const idx = STATUS_CYCLE.indexOf(status);
@@ -1110,9 +861,9 @@ function renderCard(container, task, handlers) {
 }
 
 // One paste-back-able report instead of "screenshot the errors dropdown,
-// then the candidates panel, then the probe panel, then tell me the date
-// field's value" — reads straight off the DOM, so it always matches exactly
-// what's currently on screen rather than a separately-tracked copy of it.
+// then the candidates panel, then tell me the date field's value" — reads
+// straight off the DOM, so it always matches exactly what's currently on
+// screen rather than a separately-tracked copy of it.
 function buildDebugSnapshot(doc) {
   const lines = [`Task Juggler debug snapshot — ${new Date().toISOString()}`, ''];
 
@@ -1137,20 +888,6 @@ function buildDebugSnapshot(doc) {
       for (const li of group.querySelectorAll('li')) lines.push(`  - ${li.textContent.trim()}`);
     }
   }
-  lines.push('');
-
-  lines.push('--- Last connector probe ---');
-  const probeEl = doc.getElementById('jg-probe');
-  if (!probeEl || probeEl.hidden) {
-    lines.push('(not run this session — click Probe first if relevant)');
-  } else {
-    // Preserved verbatim, not trimmed to one line — the probe's whole point
-    // is the literal formatting of a raw connector response.
-    for (const li of probeEl.querySelectorAll(':scope > ul > li')) {
-      lines.push(`* ${li.textContent.trim()}`);
-    }
-  }
-
   return lines.join('\n');
 }
 
@@ -1186,18 +923,32 @@ function slackChangeSignal(hash) {
   return `${SLACK_JUDGMENT_VERSION}:${hash}`;
 }
 
-// How many trailing transcript messages to send when judging a session.
-// Deliberately small: the tail is where the open question lives, and this is
-// the single biggest lever on per-scan token cost.
-const SESSION_TAIL_MESSAGES = 6;
-
 // Sources with no per-task refresh adapter — created via manual add or
 // deep-scan, then user-managed. `slack` is here too even though it does get
 // refreshed: it's handled exclusively by the batch triage pipeline below,
-// never by the per-task refreshTask/canonicalize path.
+// never by the per-task refreshTask/canonicalize path. `claude_session` stays
+// listed even though nothing creates one anymore, so a task saved by an
+// older build doesn't crash refreshTask — it just gets skipped, like manual.
 const NO_REFRESH_ADAPTER_SOURCES = new Set([
   'manual', 'url', 'todoist', 'devin', 'claude_code_session', 'claude_session', 'slack',
 ]);
+
+// A real production hang was observed: widening the Slack lookback enough
+// to pull in one very large thread made the batch classification call never
+// return, with no error, because nothing bounds how long a bridge call is
+// allowed to take. There's no confirmed real latency data to tune this
+// against — the point isn't precision, it's making sure a hung call becomes
+// a bounded, visible failure (through the same errors-array path every
+// other failure already uses) instead of an unbounded, silent one.
+const ASK_CLAUDE_TIMEOUT_MS = 60_000;
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 function canonicalize(task, rawContext) {
   if (task.source === 'linear') return normalizeLinearIssue(rawContext ?? {});
@@ -1218,9 +969,10 @@ function canonicalize(task, rawContext) {
 async function classifySlackBatch(entries, askClaude) {
   if (entries.length === 0) return { verdicts: new Map(), errors: [] };
   try {
-    const raw = await askClaude(
-      buildSlackBatchPrompt(entries.map((e) => ({ threadKey: e.key, rawText: e.rawText }))),
-      []
+    const raw = await withTimeout(
+      askClaude(buildSlackBatchPrompt(entries.map((e) => ({ threadKey: e.key, rawText: e.rawText }))), []),
+      ASK_CLAUDE_TIMEOUT_MS,
+      `Slack classification (${entries.length} thread${entries.length === 1 ? '' : 's'})`
     );
     return { verdicts: parseSlackBatchVerdicts(raw) ?? new Map(), errors: [] };
   } catch (err) {
@@ -1307,7 +1059,7 @@ function createApp({ storage, callMcpTool, askClaude, toolNames, now = () => new
       const newHash = djb2Hash(canonical);
       if (newHash === task.contextHash) return { task, aiCalled: false };
 
-      const aiResult = await refreshTaskViaAi(task, canonical, askClaude);
+      const aiResult = await withTimeout(refreshTaskViaAi(task, canonical, askClaude), ASK_CLAUDE_TIMEOUT_MS, `AI refresh (${task.title})`);
       if (!aiResult) return { task, aiCalled: true, parseFailed: true };
 
       const patch = {
@@ -1582,152 +1334,27 @@ function createApp({ storage, callMcpTool, askClaude, toolNames, now = () => new
     };
   }
 
-  // Session-listing tools seen in the wild, tried in order. Claude Code
-  // exposes ccd_session_mgmt (verified: a real array of
-  // {sessionId,title,cwd,isArchived,isRunning,lastActivityAt}); Cowork has
-  // been reported to expose session_info with a prose response instead.
-  // Extra names can be added via toolNames.sessionProbeNames without a
-  // rebuild, since a probe whose candidate list is hardcoded goes stale the
-  // moment a host renames something.
-  const KNOWN_SESSION_TOOL_NAMES = [
-    'mcp__session_info__list_sessions',
-    'mcp__ccd_session_mgmt__list_sessions',
-  ];
-
-  // A bare "400" from a tool that IS allowlisted usually means the arguments
-  // are wrong, not that the tool is unusable — so try a few plausible shapes
-  // rather than reporting one failure and stopping. Small limits throughout:
-  // this is a shape probe, not a data pull, and a 195-session dump would bury
-  // the structure being read.
-  const SESSION_PROBE_ARG_VARIANTS = [{ limit: 3 }, {}, { limit: '3' }];
-
-  // Runs on demand (never on the auto-refresh tick — it deliberately calls
-  // tools that may not exist). Answers the two questions no amount of
-  // describing a response can: can this tool be called from inside the
-  // artifact's sandbox, and what does it *literally* return here.
-  async function probeSessionTools() {
-    const names = [...new Set([
-      ...(toolNames.sessionList ? [toolNames.sessionList] : []),
-      ...(toolNames.sessionProbeNames ?? []),
-      ...KNOWN_SESSION_TOOL_NAMES,
-    ])];
-
-    const reports = [];
-    for (const name of names) {
-      for (const args of SESSION_PROBE_ARG_VARIANTS) {
-        const report = await probeTool(callMcpTool, name, args);
-        reports.push(report);
-        if (report.outcome === 'ok') break; // found a working signature
-        // An allowlist refusal is about the tool, not the arguments — more
-        // variants would just produce identical noise.
-        if (isAllowlistError(report.error)) break;
-        if (report.outcome === 'unreachable') break;
-      }
-    }
-    return reports;
-  }
-
-  // Coded against the live-verified ccd_session_mgmt shape only:
-  // { sessionId, title, cwd, isArchived, isRunning, lastActivityAt } arrays.
-  // Cowork has been observed exposing a *different* server (session_info)
-  // with a prose response and none of those fields — deliberately NOT
-  // supported here. Rather than silently returning zero candidates against
-  // an unrecognized shape (indistinguishable from "nothing to report"),
-  // this surfaces the mismatch as an explicit error so it doesn't masquerade
-  // as "no in-flight sessions." Wiring up session_info itself needs a real
-  // probe from inside the artifact — that's what probeSessionTools is for.
-  async function discoverClaudeSessionCandidates(blockedKeys, watermarks) {
-    // An unset tool name is the single most likely reason this source shows
-    // zero, and a bare "0" is indistinguishable from "looked, found nothing."
-    // Say which it is.
-    if (!toolNames.sessionList) {
-      return {
-        candidates: [], error: null,
-        detected: [{ key: 'claude:not-configured', label: 'no session-list tool configured (sessionList is unset)', outcome: 'not-configured' }],
-      };
-    }
-
-    let result;
-    try {
-      result = await callMcpTool(toolNames.sessionList, { limit: 25 });
-    } catch (err) {
-      return { candidates: [], error: `Claude sessions: ${err?.message ?? 'connector error'}`, detected: [] };
-    }
-    const sessions = unwrapMcpResult(result);
-    const list = Array.isArray(sessions) ? sessions : (Array.isArray(sessions?.sessions) ? sessions.sessions : null);
-
-    if (list === null) {
-      return {
-        candidates: [],
-        error: `list_sessions returned an unrecognized shape (expected an array or {sessions: [...]}, got ${typeof sessions}) — Claude session ingestion is coded against ccd_session_mgmt only and will not guess at a different server's format.`,
-        detected: [],
-      };
-    }
-
-    // Stale/archived sessions are excluded before the debug view even sees
-    // them — with up to 25 sessions in play, showing every ancient one would
-    // bury the signal, and "too old to matter" is a settled, cheap filter.
-    const detected = [];
-    const candidates = list.filter((s) => {
-      if (!isCandidateClaudeSession(s, now())) return false;
-      const key = sourceRefKey({ source: 'claude_session', sourceRef: { sessionId: s.sessionId } });
-      if (blockedKeys.has(key)) return false; // dismissed — permanently invisible by design
-      const unchanged = isUnchangedSinceLastScan(key, changeSignalFor('claude_session', s), watermarks);
-      if (unchanged) detected.push({ key, label: s.title, outcome: 'unchanged' });
-      return !unchanged;
-    });
-
-    const classified = await mapWithConcurrency(candidates, CONCURRENCY, async (session) => {
-      const key = sourceRefKey({ source: 'claude_session', sourceRef: { sessionId: session.sessionId } });
-      try {
-        const eventsResult = await callMcpTool(toolNames.sessionEvents, {
-          session_id: session.sessionId, limit: SESSION_TAIL_MESSAGES,
-        });
-        const tail = unwrapMcpResult(eventsResult);
-
-        setWatermark(key, changeSignalFor('claude_session', session), storage);
-        if (typeof tail !== 'string' || !tail.trim()) {
-          detected.push({ key, label: session.title, outcome: 'no-transcript' });
-          return null;
-        }
-
-        const judgment = parseSessionJudgment(await askClaude(buildSessionJudgmentPrompt(session, tail), []));
-        if (!judgment?.needsAttention) {
-          detected.push({ key, label: session.title, outcome: 'not-needed' });
-          return null;
-        }
-        detected.push({ key, label: session.title, outcome: 'added' });
-        return claudeSessionCandidateToTask(session, judgment);
-      } catch {
-        detected.push({ key, label: session.title, outcome: 'fetch-failed' });
-        return null; // one session's failure must not block the rest of the batch
-      }
-    });
-
-    return { candidates: classified.filter(Boolean), error: null, detected };
-  }
-
   // Known minor gap, not a correctness issue: unlike refreshAll/runSlackTriage,
   // this has no debounce of its own, so rapid repeated calls re-run the
   // Linear/Todoist fetches each time. Harmless in practice — mergeSeedTasks
   // prevents duplicates — but worth fixing if this gets called on a tighter
   // loop than the current 5-minute auto-refresh interval. Slack is handled
-  // entirely by runSlackTriage now, not here.
+  // entirely by runSlackTriage now, not here. Claude sessions aren't handled
+  // here at all — see the "Claude Desktop / Cowork sessions" note in the
+  // juggler skill: a live probe from inside a deployed artifact confirmed
+  // session-listing tools are blocked at the artifact-bridge layer even
+  // when correctly configured and reachable from chat, so that discovery
+  // has to run via the skill's chat-driven deep-scan flow instead.
   async function discoverNewTasks() {
     const dismissedKeys = loadDismissedKeys(storage);
-    const watermarks = loadWatermarks(storage);
-    // Anything already tracked or explicitly dismissed is blocked from even
-    // being fetched again, let alone re-judged by an LLM.
-    const blockedKeys = new Set([...getTasks().map(sourceRefKey), ...dismissedKeys]);
 
-    const [linearResult, todoistResult, sessionResult] = await Promise.all([
+    const [linearResult, todoistResult] = await Promise.all([
       discoverLinearCandidates(),
       discoverTodoistCandidates(),
-      discoverClaudeSessionCandidates(blockedKeys, watermarks),
     ]);
 
     const candidateTasks = [
-      ...linearResult.candidates, ...todoistResult.candidates, ...sessionResult.candidates,
+      ...linearResult.candidates, ...todoistResult.candidates,
     ].map((c) => blankTask({
       title: c.title, source: c.source, sourceRef: c.sourceRef,
       ballInUsersCourt: c.ballInUsersCourt ?? false, now: now(),
@@ -1743,18 +1370,13 @@ function createApp({ storage, callMcpTool, askClaude, toolNames, now = () => new
     const errors = [
       ...linearResult.errors,
       ...(todoistResult.error ? [todoistResult.error] : []),
-      ...(sessionResult.error ? [sessionResult.error] : []),
     ];
     // Linear can't know "added vs. already-tracked" for itself — it doesn't
     // see the existing task list — so that's resolved here instead.
     const linearDetected = linearResult.detected.map((d) => ({
       ...d, outcome: existingKeys.has(d.key) ? 'already-tracked' : 'added',
     }));
-    return {
-      added: merged.length - existing.length,
-      errors,
-      detected: { linear: linearDetected, claude: sessionResult.detected },
-    };
+    return { added: merged.length - existing.length, errors, detected: { linear: linearDetected } };
   }
 
   function addManualTask(title) {
@@ -1794,7 +1416,7 @@ function createApp({ storage, callMcpTool, askClaude, toolNames, now = () => new
   }
 
   return {
-    getTasks, refreshAll, refreshOne, discoverNewTasks, runSlackTriage, probeSessionTools,
+    getTasks, refreshAll, refreshOne, discoverNewTasks, runSlackTriage,
     getSlackLookbackDate: () => loadSlackLookbackDate(storage),
     setSlackLookbackDate: (dateStr) => setSlackLookbackDate(dateStr, storage),
     addManualTask, addByLink, cycleStatusManual, reopen, remove, undismissAll,
@@ -1814,9 +1436,18 @@ const DEFAULT_TOOL_NAMES = {
   slackSearch: '',
   linearWorkspaces: {},
   todoistFindTasks: '',
-  sessionList: '',
-  sessionEvents: '',
 };
+
+// Claude session discovery doesn't run from inside the artifact at all — a
+// live probe confirmed session-listing tools are blocked at the
+// artifact-bridge layer even when correctly configured (see SKILL.md). This
+// is what the "Claude" column in the candidates panel always shows instead
+// of a live per-scan result, since there's nothing here to report.
+const CLAUDE_SESSIONS_INFO = [{
+  key: 'claude:chat-only',
+  label: 'Tracked via Cowork chat, not this artifact — ask chat to "scan my Claude sessions" (see SKILL.md)',
+  outcome: 'info',
+}];
 
 // While the artifact is open and visible, check for updates and new
 // candidates automatically — no scheduled task or background service
@@ -1908,7 +1539,7 @@ function mountApp(doc, app, options = {}) {
       ]);
       renderCandidates(doc.getElementById('jg-candidates'), {
         slack: slackResult.detected ?? [],
-        claude: discoverResult.detected?.claude ?? [],
+        claude: CLAUDE_SESSIONS_INFO,
         linear: discoverResult.detected?.linear ?? [],
       });
     } catch (err) {
@@ -1922,27 +1553,6 @@ function mountApp(doc, app, options = {}) {
   }
 
   doc.getElementById('jg-refresh-btn').addEventListener('click', () => runRefreshAndDiscover('Refresh'));
-
-  // On-demand only, never on the auto-refresh tick: this deliberately calls
-  // tool names that may not exist, and "it threw" is a meaningful result
-  // here rather than a failure — so it reports rather than surfacing errors.
-  doc.getElementById('jg-probe-btn').addEventListener('click', async () => {
-    const statusEl = doc.getElementById('jg-status');
-    if (offline) {
-      statusEl.textContent = 'Local mode — no connectors to probe';
-      return;
-    }
-    statusEl.textContent = 'Probing connectors…';
-    try {
-      const reports = await app.probeSessionTools();
-      renderProbe(doc.getElementById('jg-probe'), reports);
-      doc.getElementById('jg-probe').open = true;
-      const ok = reports.filter((r) => r.outcome === 'ok').length;
-      statusEl.textContent = `Probed ${reports.length} call${reports.length === 1 ? '' : 's'}, ${ok} succeeded`;
-    } catch (err) {
-      statusEl.textContent = `Probe failed: ${err?.message ?? 'unknown error'}`;
-    }
-  });
 
   doc.getElementById('jg-view-toggle').addEventListener('click', () => {
     viewMode = viewMode === 'list' ? 'card' : 'list';
@@ -1963,11 +1573,11 @@ function mountApp(doc, app, options = {}) {
   });
 
   // One click instead of "screenshot the errors dropdown, then the
-  // candidates panel, then the probe panel, then tell me the date field's
-  // value" every time something needs reporting. Clipboard access from
-  // inside an artifact iframe is unverified — the session_info restriction
-  // already showed the sandbox can behave unexpectedly — so this degrades
-  // to a visible, selectable textarea rather than assuming writeText works.
+  // candidates panel, then tell me the date field's value" every time
+  // something needs reporting. Clipboard access from inside an artifact
+  // iframe is unverified — the session_info restriction already showed the
+  // sandbox can behave unexpectedly — so this degrades to a visible,
+  // selectable textarea rather than assuming writeText works.
   doc.getElementById('jg-copy-debug-btn').addEventListener('click', async () => {
     const text = buildDebugSnapshot(doc);
     const statusEl = doc.getElementById('jg-status');

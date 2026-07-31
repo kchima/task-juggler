@@ -1,5 +1,5 @@
 import { createApp } from './app.js';
-import { renderList, renderCard, nextStatus, renderErrors, renderCandidates, renderProbe, buildDebugSnapshot } from './ui.js';
+import { renderList, renderCard, nextStatus, renderErrors, renderCandidates, buildDebugSnapshot } from './ui.js';
 import { mergeSeedTasks, readSeedFromDocument } from './seedMerge.js';
 import { loadTasks, saveTasks } from './storage.js';
 import { sortTasks } from './scoring.js';
@@ -9,9 +9,18 @@ const DEFAULT_TOOL_NAMES = {
   slackSearch: '',
   linearWorkspaces: {},
   todoistFindTasks: '',
-  sessionList: '',
-  sessionEvents: '',
 };
+
+// Claude session discovery doesn't run from inside the artifact at all — a
+// live probe confirmed session-listing tools are blocked at the
+// artifact-bridge layer even when correctly configured (see SKILL.md). This
+// is what the "Claude" column in the candidates panel always shows instead
+// of a live per-scan result, since there's nothing here to report.
+const CLAUDE_SESSIONS_INFO = [{
+  key: 'claude:chat-only',
+  label: 'Tracked via Cowork chat, not this artifact — ask chat to "scan my Claude sessions" (see SKILL.md)',
+  outcome: 'info',
+}];
 
 // While the artifact is open and visible, check for updates and new
 // candidates automatically — no scheduled task or background service
@@ -103,7 +112,7 @@ export function mountApp(doc, app, options = {}) {
       ]);
       renderCandidates(doc.getElementById('jg-candidates'), {
         slack: slackResult.detected ?? [],
-        claude: discoverResult.detected?.claude ?? [],
+        claude: CLAUDE_SESSIONS_INFO,
         linear: discoverResult.detected?.linear ?? [],
       });
     } catch (err) {
@@ -117,27 +126,6 @@ export function mountApp(doc, app, options = {}) {
   }
 
   doc.getElementById('jg-refresh-btn').addEventListener('click', () => runRefreshAndDiscover('Refresh'));
-
-  // On-demand only, never on the auto-refresh tick: this deliberately calls
-  // tool names that may not exist, and "it threw" is a meaningful result
-  // here rather than a failure — so it reports rather than surfacing errors.
-  doc.getElementById('jg-probe-btn').addEventListener('click', async () => {
-    const statusEl = doc.getElementById('jg-status');
-    if (offline) {
-      statusEl.textContent = 'Local mode — no connectors to probe';
-      return;
-    }
-    statusEl.textContent = 'Probing connectors…';
-    try {
-      const reports = await app.probeSessionTools();
-      renderProbe(doc.getElementById('jg-probe'), reports);
-      doc.getElementById('jg-probe').open = true;
-      const ok = reports.filter((r) => r.outcome === 'ok').length;
-      statusEl.textContent = `Probed ${reports.length} call${reports.length === 1 ? '' : 's'}, ${ok} succeeded`;
-    } catch (err) {
-      statusEl.textContent = `Probe failed: ${err?.message ?? 'unknown error'}`;
-    }
-  });
 
   doc.getElementById('jg-view-toggle').addEventListener('click', () => {
     viewMode = viewMode === 'list' ? 'card' : 'list';
@@ -158,11 +146,11 @@ export function mountApp(doc, app, options = {}) {
   });
 
   // One click instead of "screenshot the errors dropdown, then the
-  // candidates panel, then the probe panel, then tell me the date field's
-  // value" every time something needs reporting. Clipboard access from
-  // inside an artifact iframe is unverified — the session_info restriction
-  // already showed the sandbox can behave unexpectedly — so this degrades
-  // to a visible, selectable textarea rather than assuming writeText works.
+  // candidates panel, then tell me the date field's value" every time
+  // something needs reporting. Clipboard access from inside an artifact
+  // iframe is unverified — the session_info restriction already showed the
+  // sandbox can behave unexpectedly — so this degrades to a visible,
+  // selectable textarea rather than assuming writeText works.
   doc.getElementById('jg-copy-debug-btn').addEventListener('click', async () => {
     const text = buildDebugSnapshot(doc);
     const statusEl = doc.getElementById('jg-status');

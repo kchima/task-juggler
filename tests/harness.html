@@ -10,7 +10,6 @@
   import {
     MOCK_TOOL_NAMES, MOCK_SLACK_THREAD_V1, MOCK_LINEAR_ISSUE,
     MOCK_LINEAR_DISCOVERY_ISSUE, MOCK_TODOIST_DISCOVERY_ITEM, MOCK_SLACK_DISCOVERY_THREAD,
-    MOCK_CCD_SESSION, MOCK_CCD_SESSION_TAIL,
   } from './mock-fixtures.js';
 
   const state = { slackVersion: 1, breakLinearGlobex: false, breakSlackAskClaude: false };
@@ -50,34 +49,6 @@
       }
       if (name === MOCK_TOOL_NAMES.slackSearch) {
         return { content: [{ text: MOCK_SLACK_DISCOVERY_THREAD.searchSnippet }], isError: false };
-      }
-      if (name === MOCK_TOOL_NAMES.sessionList) {
-        return { structuredContent: [MOCK_CCD_SESSION], isError: false };
-      }
-      if (name === MOCK_TOOL_NAMES.sessionEvents) {
-        return { content: [{ text: MOCK_CCD_SESSION_TAIL }], isError: false };
-      }
-      // Simulates the Cowork situation the probe exists to diagnose:
-      // session_info is present but returns PROSE, while ccd_session_mgmt
-      // (what the code is written against) isn't reachable at all. Content is
-      // synthetic; the two failure modes are the real ones being hunted.
-      // Reproduces the two DIFFERENT real failures captured from a deployed
-      // Cowork artifact: session_info is allowlisted but 400s on the args we
-      // guessed, while ccd_session_mgmt is refused by the allowlist outright.
-      if (name === 'mcp__session_info__list_sessions') {
-        if (Object.keys(args ?? {}).length > 0) {
-          return { content: [{ type: 'text', text: 'Tool call failed: 400 ' }], isError: true };
-        }
-        return {
-          content: [{ type: 'text', text: 'Sessions (3 of 195, most recent first — use limit to see more)\n - local_abc123 "Fix the flaky retry logic" (idle, cwd: /Users/dev/workspace, is_child: false)\n - local_def456 "Draft the release notes" (running, cwd: /Users/dev/other, is_child: true)\n' }],
-          isError: false,
-        };
-      }
-      if (name === 'mcp__ccd_session_mgmt__list_sessions') {
-        return {
-          content: [{ type: 'text', text: 'Tool "mcp__ccd_session_mgmt__list_sessions" is not in this artifact\'s mcp_tools allowlist.' }],
-          isError: true,
-        };
       }
       return { content: [{ text: '{}' }], isError: true };
     },

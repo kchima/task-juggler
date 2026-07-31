@@ -3,7 +3,7 @@ import {
   loadDismissedKeys, addDismissedKey, clearDismissedKeys, loadWatermarks, setWatermark,
   loadSlackLookbackDate, setSlackLookbackDate,
 } from './storage.js';
-import { fetchRawContext, unwrapMcpResult, slackThreadText, probeTool, isAllowlistError } from './mcpAdapters.js';
+import { fetchRawContext, unwrapMcpResult, slackThreadText } from './mcpAdapters.js';
 import { normalizeLinearIssue, normalizeSlackThread } from './normalize.js';
 import { djb2Hash } from './hash.js';
 import { refreshTaskViaAi } from './aiClient.js';
@@ -15,9 +15,6 @@ import {
   passesTodoistGate, todoistCandidateToTask,
   isUnresolvedLinearIssue, linearCandidateToTask,
   extractSlackThreadRefs, buildSlackRecentQueries, buildSlackBatchPrompt, parseSlackBatchVerdicts,
-  isCandidateClaudeSession, claudeSessionCandidateToTask,
-  buildSessionJudgmentPrompt, parseSessionJudgment,
-  changeSignalFor, isUnchangedSinceLastScan,
 } from './discovery.js';
 
 const REFRESH_DEBOUNCE_MS = 30_000;
@@ -39,18 +36,32 @@ function slackChangeSignal(hash) {
   return `${SLACK_JUDGMENT_VERSION}:${hash}`;
 }
 
-// How many trailing transcript messages to send when judging a session.
-// Deliberately small: the tail is where the open question lives, and this is
-// the single biggest lever on per-scan token cost.
-const SESSION_TAIL_MESSAGES = 6;
-
 // Sources with no per-task refresh adapter — created via manual add or
 // deep-scan, then user-managed. `slack` is here too even though it does get
 // refreshed: it's handled exclusively by the batch triage pipeline below,
-// never by the per-task refreshTask/canonicalize path.
+// never by the per-task refreshTask/canonicalize path. `claude_session` stays
+// listed even though nothing creates one anymore, so a task saved by an
+// older build doesn't crash refreshTask — it just gets skipped, like manual.
 const NO_REFRESH_ADAPTER_SOURCES = new Set([
   'manual', 'url', 'todoist', 'devin', 'claude_code_session', 'claude_session', 'slack',
 ]);
+
+// A real production hang was observed: widening the Slack lookback enough
+// to pull in one very large thread made the batch classification call never
+// return, with no error, because nothing bounds how long a bridge call is
+// allowed to take. There's no confirmed real latency data to tune this
+// against — the point isn't precision, it's making sure a hung call becomes
+// a bounded, visible failure (through the same errors-array path every
+// other failure already uses) instead of an unbounded, silent one.
+const ASK_CLAUDE_TIMEOUT_MS = 60_000;
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 function canonicalize(task, rawContext) {
   if (task.source === 'linear') return normalizeLinearIssue(rawContext ?? {});
@@ -71,9 +82,10 @@ function canonicalize(task, rawContext) {
 async function classifySlackBatch(entries, askClaude) {
   if (entries.length === 0) return { verdicts: new Map(), errors: [] };
   try {
-    const raw = await askClaude(
-      buildSlackBatchPrompt(entries.map((e) => ({ threadKey: e.key, rawText: e.rawText }))),
-      []
+    const raw = await withTimeout(
+      askClaude(buildSlackBatchPrompt(entries.map((e) => ({ threadKey: e.key, rawText: e.rawText }))), []),
+      ASK_CLAUDE_TIMEOUT_MS,
+      `Slack classification (${entries.length} thread${entries.length === 1 ? '' : 's'})`
     );
     return { verdicts: parseSlackBatchVerdicts(raw) ?? new Map(), errors: [] };
   } catch (err) {
@@ -160,7 +172,7 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
       const newHash = djb2Hash(canonical);
       if (newHash === task.contextHash) return { task, aiCalled: false };
 
-      const aiResult = await refreshTaskViaAi(task, canonical, askClaude);
+      const aiResult = await withTimeout(refreshTaskViaAi(task, canonical, askClaude), ASK_CLAUDE_TIMEOUT_MS, `AI refresh (${task.title})`);
       if (!aiResult) return { task, aiCalled: true, parseFailed: true };
 
       const patch = {
@@ -435,152 +447,27 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
     };
   }
 
-  // Session-listing tools seen in the wild, tried in order. Claude Code
-  // exposes ccd_session_mgmt (verified: a real array of
-  // {sessionId,title,cwd,isArchived,isRunning,lastActivityAt}); Cowork has
-  // been reported to expose session_info with a prose response instead.
-  // Extra names can be added via toolNames.sessionProbeNames without a
-  // rebuild, since a probe whose candidate list is hardcoded goes stale the
-  // moment a host renames something.
-  const KNOWN_SESSION_TOOL_NAMES = [
-    'mcp__session_info__list_sessions',
-    'mcp__ccd_session_mgmt__list_sessions',
-  ];
-
-  // A bare "400" from a tool that IS allowlisted usually means the arguments
-  // are wrong, not that the tool is unusable — so try a few plausible shapes
-  // rather than reporting one failure and stopping. Small limits throughout:
-  // this is a shape probe, not a data pull, and a 195-session dump would bury
-  // the structure being read.
-  const SESSION_PROBE_ARG_VARIANTS = [{ limit: 3 }, {}, { limit: '3' }];
-
-  // Runs on demand (never on the auto-refresh tick — it deliberately calls
-  // tools that may not exist). Answers the two questions no amount of
-  // describing a response can: can this tool be called from inside the
-  // artifact's sandbox, and what does it *literally* return here.
-  async function probeSessionTools() {
-    const names = [...new Set([
-      ...(toolNames.sessionList ? [toolNames.sessionList] : []),
-      ...(toolNames.sessionProbeNames ?? []),
-      ...KNOWN_SESSION_TOOL_NAMES,
-    ])];
-
-    const reports = [];
-    for (const name of names) {
-      for (const args of SESSION_PROBE_ARG_VARIANTS) {
-        const report = await probeTool(callMcpTool, name, args);
-        reports.push(report);
-        if (report.outcome === 'ok') break; // found a working signature
-        // An allowlist refusal is about the tool, not the arguments — more
-        // variants would just produce identical noise.
-        if (isAllowlistError(report.error)) break;
-        if (report.outcome === 'unreachable') break;
-      }
-    }
-    return reports;
-  }
-
-  // Coded against the live-verified ccd_session_mgmt shape only:
-  // { sessionId, title, cwd, isArchived, isRunning, lastActivityAt } arrays.
-  // Cowork has been observed exposing a *different* server (session_info)
-  // with a prose response and none of those fields — deliberately NOT
-  // supported here. Rather than silently returning zero candidates against
-  // an unrecognized shape (indistinguishable from "nothing to report"),
-  // this surfaces the mismatch as an explicit error so it doesn't masquerade
-  // as "no in-flight sessions." Wiring up session_info itself needs a real
-  // probe from inside the artifact — that's what probeSessionTools is for.
-  async function discoverClaudeSessionCandidates(blockedKeys, watermarks) {
-    // An unset tool name is the single most likely reason this source shows
-    // zero, and a bare "0" is indistinguishable from "looked, found nothing."
-    // Say which it is.
-    if (!toolNames.sessionList) {
-      return {
-        candidates: [], error: null,
-        detected: [{ key: 'claude:not-configured', label: 'no session-list tool configured (sessionList is unset)', outcome: 'not-configured' }],
-      };
-    }
-
-    let result;
-    try {
-      result = await callMcpTool(toolNames.sessionList, { limit: 25 });
-    } catch (err) {
-      return { candidates: [], error: `Claude sessions: ${err?.message ?? 'connector error'}`, detected: [] };
-    }
-    const sessions = unwrapMcpResult(result);
-    const list = Array.isArray(sessions) ? sessions : (Array.isArray(sessions?.sessions) ? sessions.sessions : null);
-
-    if (list === null) {
-      return {
-        candidates: [],
-        error: `list_sessions returned an unrecognized shape (expected an array or {sessions: [...]}, got ${typeof sessions}) — Claude session ingestion is coded against ccd_session_mgmt only and will not guess at a different server's format.`,
-        detected: [],
-      };
-    }
-
-    // Stale/archived sessions are excluded before the debug view even sees
-    // them — with up to 25 sessions in play, showing every ancient one would
-    // bury the signal, and "too old to matter" is a settled, cheap filter.
-    const detected = [];
-    const candidates = list.filter((s) => {
-      if (!isCandidateClaudeSession(s, now())) return false;
-      const key = sourceRefKey({ source: 'claude_session', sourceRef: { sessionId: s.sessionId } });
-      if (blockedKeys.has(key)) return false; // dismissed — permanently invisible by design
-      const unchanged = isUnchangedSinceLastScan(key, changeSignalFor('claude_session', s), watermarks);
-      if (unchanged) detected.push({ key, label: s.title, outcome: 'unchanged' });
-      return !unchanged;
-    });
-
-    const classified = await mapWithConcurrency(candidates, CONCURRENCY, async (session) => {
-      const key = sourceRefKey({ source: 'claude_session', sourceRef: { sessionId: session.sessionId } });
-      try {
-        const eventsResult = await callMcpTool(toolNames.sessionEvents, {
-          session_id: session.sessionId, limit: SESSION_TAIL_MESSAGES,
-        });
-        const tail = unwrapMcpResult(eventsResult);
-
-        setWatermark(key, changeSignalFor('claude_session', session), storage);
-        if (typeof tail !== 'string' || !tail.trim()) {
-          detected.push({ key, label: session.title, outcome: 'no-transcript' });
-          return null;
-        }
-
-        const judgment = parseSessionJudgment(await askClaude(buildSessionJudgmentPrompt(session, tail), []));
-        if (!judgment?.needsAttention) {
-          detected.push({ key, label: session.title, outcome: 'not-needed' });
-          return null;
-        }
-        detected.push({ key, label: session.title, outcome: 'added' });
-        return claudeSessionCandidateToTask(session, judgment);
-      } catch {
-        detected.push({ key, label: session.title, outcome: 'fetch-failed' });
-        return null; // one session's failure must not block the rest of the batch
-      }
-    });
-
-    return { candidates: classified.filter(Boolean), error: null, detected };
-  }
-
   // Known minor gap, not a correctness issue: unlike refreshAll/runSlackTriage,
   // this has no debounce of its own, so rapid repeated calls re-run the
   // Linear/Todoist fetches each time. Harmless in practice — mergeSeedTasks
   // prevents duplicates — but worth fixing if this gets called on a tighter
   // loop than the current 5-minute auto-refresh interval. Slack is handled
-  // entirely by runSlackTriage now, not here.
+  // entirely by runSlackTriage now, not here. Claude sessions aren't handled
+  // here at all — see the "Claude Desktop / Cowork sessions" note in the
+  // juggler skill: a live probe from inside a deployed artifact confirmed
+  // session-listing tools are blocked at the artifact-bridge layer even
+  // when correctly configured and reachable from chat, so that discovery
+  // has to run via the skill's chat-driven deep-scan flow instead.
   async function discoverNewTasks() {
     const dismissedKeys = loadDismissedKeys(storage);
-    const watermarks = loadWatermarks(storage);
-    // Anything already tracked or explicitly dismissed is blocked from even
-    // being fetched again, let alone re-judged by an LLM.
-    const blockedKeys = new Set([...getTasks().map(sourceRefKey), ...dismissedKeys]);
 
-    const [linearResult, todoistResult, sessionResult] = await Promise.all([
+    const [linearResult, todoistResult] = await Promise.all([
       discoverLinearCandidates(),
       discoverTodoistCandidates(),
-      discoverClaudeSessionCandidates(blockedKeys, watermarks),
     ]);
 
     const candidateTasks = [
-      ...linearResult.candidates, ...todoistResult.candidates, ...sessionResult.candidates,
+      ...linearResult.candidates, ...todoistResult.candidates,
     ].map((c) => blankTask({
       title: c.title, source: c.source, sourceRef: c.sourceRef,
       ballInUsersCourt: c.ballInUsersCourt ?? false, now: now(),
@@ -596,18 +483,13 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
     const errors = [
       ...linearResult.errors,
       ...(todoistResult.error ? [todoistResult.error] : []),
-      ...(sessionResult.error ? [sessionResult.error] : []),
     ];
     // Linear can't know "added vs. already-tracked" for itself — it doesn't
     // see the existing task list — so that's resolved here instead.
     const linearDetected = linearResult.detected.map((d) => ({
       ...d, outcome: existingKeys.has(d.key) ? 'already-tracked' : 'added',
     }));
-    return {
-      added: merged.length - existing.length,
-      errors,
-      detected: { linear: linearDetected, claude: sessionResult.detected },
-    };
+    return { added: merged.length - existing.length, errors, detected: { linear: linearDetected } };
   }
 
   function addManualTask(title) {
@@ -647,7 +529,7 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
   }
 
   return {
-    getTasks, refreshAll, refreshOne, discoverNewTasks, runSlackTriage, probeSessionTools,
+    getTasks, refreshAll, refreshOne, discoverNewTasks, runSlackTriage,
     getSlackLookbackDate: () => loadSlackLookbackDate(storage),
     setSlackLookbackDate: (dateStr) => setSlackLookbackDate(dateStr, storage),
     addManualTask, addByLink, cycleStatusManual, reopen, remove, undismissAll,

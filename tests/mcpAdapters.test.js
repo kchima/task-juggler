@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { unwrapMcpResult, fetchRawContext, slackThreadText, summarizeMcpShape, probeTool, isAllowlistError } from '../src/mcpAdapters.js';
+import { unwrapMcpResult, fetchRawContext, slackThreadText } from '../src/mcpAdapters.js';
 import acmeIssue from './fixtures/linear-acme-issue.json' with { type: 'json' };
 import slackThread from './fixtures/slack-thread.json' with { type: 'json' };
 
@@ -64,110 +64,6 @@ describe('slackThreadText', () => {
     const asStructured = { structuredContent: payload, isError: false };
     expect(slackThreadText(unwrapMcpResult(asText))).toBe(slackThread.rawText);
     expect(slackThreadText(unwrapMcpResult(asStructured))).toBe(slackThread.rawText);
-  });
-});
-
-describe('summarizeMcpShape / probeTool', () => {
-  it('names the envelope keys, which is the question a shape description keeps getting wrong', () => {
-    const payload = { messages: slackThread.rawText, pagination_info: slackThread.paginationInfo };
-    const shape = summarizeMcpShape({ content: [{ text: JSON.stringify(payload) }], isError: false });
-    expect(shape.unwrappedType).toBe('object');
-    expect(shape.unwrappedKeys).toEqual(['messages', 'pagination_info']);
-    // Both values are strings here, so this points straight at the candidates
-    // for "where does the actual payload live".
-    expect(shape.stringValuedKeys).toEqual(['messages', 'pagination_info']);
-    expect(shape.hasStructuredContent).toBe(false);
-    expect(shape.contentTextType).toBe('string');
-  });
-
-  it('reports a bare prose response as a string with no envelope, distinguishing it from an enveloped one', () => {
-    const prose = 'Sessions (3 of 195, most recent first)\n - abc "Some title" (idle, cwd: /x, is_child: false)\n';
-    const shape = summarizeMcpShape({ content: [{ text: prose }], isError: false });
-    expect(shape.unwrappedType).toBe('string');
-    expect(shape.unwrappedKeys).toBeNull();
-    expect(shape.rawJson).toContain('is_child');
-  });
-
-  // The rawJson dump escapes newlines, so a prose payload collapses to one
-  // unreadable line there — useless for the case the probe exists to serve.
-  // These previews keep the real line breaks.
-  it('exposes a prose payload with its real line breaks, not JSON-escaped', () => {
-    const prose = 'Sessions (3 of 195)\n - abc "Some title" (idle, cwd: /x, is_child: false)\n';
-    const shape = summarizeMcpShape({ content: [{ text: prose }], isError: false });
-    expect(shape.payloadPreviews).toEqual([{ key: '(whole response)', text: prose }]);
-    expect(shape.payloadPreviews[0].text).toContain('\n'); // a real newline
-    expect(shape.rawJson).toContain('\\n');                // escaped in the dump
-  });
-
-  it('exposes each string-valued envelope key separately, so the payload key is obvious', () => {
-    const prose = 'Sessions (3 of 195)\n - abc "T" (idle, cwd: /x, is_child: false)\n';
-    const shape = summarizeMcpShape({ content: [{ text: JSON.stringify({ sessions: prose, pagination_info: 'end' }) }], isError: false });
-    expect(shape.payloadPreviews).toEqual([
-      { key: 'sessions', text: prose },
-      { key: 'pagination_info', text: 'end' },
-    ]);
-  });
-
-  it('has no string payloads to preview for an array response', () => {
-    const shape = summarizeMcpShape({ structuredContent: [{ sessionId: 's1' }], isError: false });
-    expect(shape.payloadPreviews).toEqual([]);
-  });
-
-  it('reports an array response (the verified ccd_session_mgmt shape) as an array, not an object', () => {
-    const sessions = [{ sessionId: 's1', title: 'T', cwd: '/x', isArchived: false, isRunning: false, lastActivityAt: '2026-07-25T04:41:50.813Z' }];
-    const shape = summarizeMcpShape({ structuredContent: sessions, isError: false });
-    expect(shape.unwrappedType).toBe('array');
-    expect(shape.hasStructuredContent).toBe(true);
-  });
-
-  it('probeTool reports a thrown call as unreachable rather than throwing — "not exposed here" is the answer, not an error', async () => {
-    const callMcpTool = vi.fn().mockRejectedValue(new Error('No such tool available'));
-    const report = await probeTool(callMcpTool, 'mcp__session_info__list_sessions', { limit: 3 });
-    expect(report.outcome).toBe('unreachable');
-    expect(report.error).toBe('No such tool available');
-    expect(report.shape).toBeNull();
-    expect(report.name).toBe('mcp__session_info__list_sessions');
-  });
-
-  it('probeTool returns the shape summary for a successful call', async () => {
-    const callMcpTool = vi.fn().mockResolvedValue({ content: [{ text: 'Sessions (0 of 0)' }], isError: false });
-    const report = await probeTool(callMcpTool, 'mcp__x__list_sessions', { limit: 3 });
-    expect(report.outcome).toBe('ok');
-    expect(report.shape.unwrappedType).toBe('string');
-    expect(callMcpTool).toHaveBeenCalledWith('mcp__x__list_sessions', { limit: 3 });
-  });
-
-  // The regression that matters most here: a first version of this reported
-  // isError:true as a success, because callMcpTool had returned rather than
-  // thrown. Two hard failures were displayed as "2/3 reachable".
-  it('reports an isError response as a tool-error, NOT a success — returning is not succeeding', async () => {
-    const callMcpTool = vi.fn().mockResolvedValue({
-      content: [{ type: 'text', text: 'Tool call failed: 400 ' }], isError: true,
-    });
-    const report = await probeTool(callMcpTool, 'mcp__session_info__list_sessions', { limit: 3 });
-    expect(report.outcome).toBe('tool-error');
-    expect(report.error).toBe('Tool call failed: 400 ');
-    // The shape is still captured, because a refusal's body carries the reason.
-    expect(report.shape.isError).toBe(true);
-    expect(report.shape.rawJson).toContain('400');
-  });
-
-  it('extracts an allowlist refusal so it can be told apart from every other failure', async () => {
-    const text = 'Tool "mcp__ccd_session_mgmt__list_sessions" is not in this artifact\'s mcp_tools allowlist.';
-    const callMcpTool = vi.fn().mockResolvedValue({ content: [{ type: 'text', text }], isError: true });
-    const report = await probeTool(callMcpTool, 'mcp__ccd_session_mgmt__list_sessions', { limit: 3 });
-    expect(report.outcome).toBe('tool-error');
-    expect(isAllowlistError(report.error)).toBe(true);
-  });
-
-  it('does not mistake an ordinary tool failure for an allowlist problem', () => {
-    expect(isAllowlistError('Tool call failed: 400 ')).toBe(false);
-    expect(isAllowlistError(null)).toBe(false);
-  });
-
-  it('truncates a huge response instead of dumping an unbounded blob into the UI', () => {
-    const huge = { content: [{ text: 'x'.repeat(20000) }], isError: false };
-    expect(summarizeMcpShape(huge).rawJson.length).toBeLessThanOrEqual(4000);
   });
 });
 

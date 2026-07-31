@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { nextStatus, renderList, renderCard, renderErrors, renderCandidates, renderProbe, buildDebugSnapshot } from '../src/ui.js';
+import { nextStatus, renderList, renderCard, renderErrors, renderCandidates, buildDebugSnapshot } from '../src/ui.js';
 
 function noopHandlers() {
   return {
@@ -120,102 +120,6 @@ describe('renderCandidates', () => {
   });
 });
 
-describe('renderProbe', () => {
-  function probeFixture() {
-    document.body.innerHTML = '<details id="jg-probe" hidden><summary></summary><ul></ul></details>';
-    return document.getElementById('jg-probe');
-  }
-
-  const PROSE = 'Sessions (3 of 195, most recent first)\n - abc123 "Fix the thing" (idle, cwd: /Users/x/dev, is_child: false)\n';
-
-  it('stays hidden until a probe has actually run', () => {
-    const container = probeFixture();
-    renderProbe(container, []);
-    expect(container.hidden).toBe(true);
-  });
-
-  it('renders the prose payload with its real line breaks so the literal format can be read off the screen', () => {
-    const container = probeFixture();
-    renderProbe(container, [{
-      name: 'mcp__session_info__list_sessions', args: { limit: 3 }, outcome: 'ok', error: null,
-      shape: {
-        isError: false, hasStructuredContent: false, contentTextType: 'string',
-        unwrappedType: 'string', unwrappedKeys: null, stringValuedKeys: null,
-        payloadPreviews: [{ key: '(whole response)', text: PROSE }],
-        rawJson: JSON.stringify({ content: [{ text: PROSE }] }, null, 2),
-      },
-    }]);
-    const literal = container.querySelector('.jg-probe-literal');
-    expect(literal.tagName).toBe('PRE');
-    // The exact line format is recoverable verbatim — the whole point.
-    expect(literal.textContent).toContain(' - abc123 "Fix the thing" (idle, cwd: /Users/x/dev, is_child: false)');
-    expect(literal.textContent).toContain('\n'); // real newline, not an escape
-    // The escaped JSON dump is still available alongside it.
-    expect(container.textContent).toContain('raw response (JSON-escaped):');
-  });
-
-  // A returned-but-refused call is NOT a success, and showing it as one is
-  // exactly how the first version of this panel reported two hard failures
-  // as "2/3 reachable".
-  it('distinguishes ok / tool-error / unreachable, and counts only real successes', () => {
-    const container = probeFixture();
-    renderProbe(container, [
-      { name: 'a', args: { limit: 3 }, outcome: 'tool-error', error: 'Tool call failed: 400 ', shape: {
-        isError: true, hasStructuredContent: false, contentTextType: 'string',
-        unwrappedType: 'null', unwrappedKeys: null, stringValuedKeys: null,
-        payloadPreviews: [], rawJson: '{"isError":true}',
-      } },
-      { name: 'b', args: {}, outcome: 'unreachable', error: 'no bridge', shape: null },
-      { name: 'c', args: { limit: 3 }, outcome: 'ok', error: null, shape: {
-        isError: false, hasStructuredContent: true, contentTextType: 'undefined',
-        unwrappedType: 'array', unwrappedKeys: null, stringValuedKeys: null,
-        payloadPreviews: [], rawJson: '[]',
-      } },
-    ]);
-    expect(container.querySelector('summary').textContent).toContain('1/3 calls succeeded');
-    const names = [...container.querySelectorAll('.jg-probe-name')].map((e) => e.textContent);
-    expect(names[0]).toContain('⚠ a');
-    expect(names[1]).toContain('✗ b');
-    expect(names[2]).toContain('✓ c');
-
-    const bodies = [...container.querySelectorAll('.jg-probe-body')].map((el) => el.textContent);
-    expect(bodies[0]).toContain('tool was reached but refused the call:');
-    expect(bodies[0]).toContain('Tool call failed: 400');
-    // A refusal still shows its raw body — that's where the real reason lives.
-    expect(container.textContent).toContain('{"isError":true}');
-  });
-
-  it('shows the arguments tried, since the same name can fail one way and succeed another', () => {
-    const container = probeFixture();
-    renderProbe(container, [
-      { name: 'a', args: { limit: 3 }, outcome: 'tool-error', error: 'Tool call failed: 400 ', shape: null },
-      { name: 'a', args: {}, outcome: 'ok', error: null, shape: {
-        isError: false, hasStructuredContent: false, contentTextType: 'string',
-        unwrappedType: 'string', unwrappedKeys: null, stringValuedKeys: null,
-        payloadPreviews: [], rawJson: '""',
-      } },
-    ]);
-    const names = [...container.querySelectorAll('.jg-probe-name')].map((e) => e.textContent);
-    expect(names[0]).toContain('{"limit":3}');
-    expect(names[1]).toContain('{}');
-  });
-
-  it('surfaces the envelope keys prominently, since that is the answer being hunted', () => {
-    const container = probeFixture();
-    renderProbe(container, [{
-      name: 'mcp__x__list_sessions', args: { limit: 3 }, outcome: 'ok', error: null,
-      shape: {
-        isError: false, hasStructuredContent: false, contentTextType: 'string',
-        unwrappedType: 'object', unwrappedKeys: ['sessions', 'pagination_info'],
-        stringValuedKeys: ['sessions'], payloadPreviews: [], rawJson: '{}',
-      },
-    }]);
-    const body = container.querySelector('.jg-probe-body').textContent;
-    expect(body).toContain('envelope keys:  ["sessions","pagination_info"]');
-    expect(body).toContain('string-valued:  ["sessions"]');
-  });
-});
-
 describe('buildDebugSnapshot', () => {
   function fullFixture() {
     document.body.innerHTML = `
@@ -227,9 +131,6 @@ describe('buildDebugSnapshot', () => {
         <details data-group="slack"><summary>Slack (1)</summary><ul><li>[added] Priya asked Dana to review pricing copy</li></ul></details>
         <details data-group="claude"><summary>Claude (0)</summary><ul><li class="jg-candidate-empty">none this scan</li></ul></details>
         <details data-group="linear"><summary>Linear (1)</summary><ul><li>[already-tracked] [Acme] Fix flaky checkout retry logic</li></ul></details>
-      </details>
-      <details id="jg-probe"><summary>Connector probe — 1/2 calls succeeded</summary>
-        <ul><li>✓ mcp__x__list_sessions {"limit":3}\ntool succeeded</li></ul>
       </details>
     `;
     return document;
@@ -253,12 +154,7 @@ describe('buildDebugSnapshot', () => {
     expect(text).toContain('[already-tracked] [Acme] Fix flaky checkout retry logic');
   });
 
-  it('includes the probe results when the probe panel is visible', () => {
-    const text = buildDebugSnapshot(fullFixture());
-    expect(text).toContain('mcp__x__list_sessions');
-  });
-
-  it('reports "(none)" for errors and "(not run)" for probe when both are in their default hidden state', () => {
+  it('reports "(none)" for errors and the default lookback note when both are in their default state', () => {
     document.body.innerHTML = `
       <span id="jg-status"></span>
       <input type="date" id="jg-lookback-input" />
@@ -268,12 +164,10 @@ describe('buildDebugSnapshot', () => {
         <details data-group="claude"><summary></summary><ul></ul></details>
         <details data-group="linear"><summary></summary><ul></ul></details>
       </details>
-      <details id="jg-probe" hidden><summary></summary><ul></ul></details>
     `;
     const text = buildDebugSnapshot(document);
     expect(text).toContain('(none)');
     expect(text).toContain('(default — last 24h)');
-    expect(text).toMatch(/not run this session/);
   });
 });
 

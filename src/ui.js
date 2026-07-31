@@ -63,82 +63,6 @@ function renderCandidateGroup(groupEl, label, items) {
   }
 }
 
-// Renders raw connector-probe output. Everything here is deliberately
-// verbatim and in a <pre>: the whole point is to read the LITERAL response
-// (exact indentation, quoting, line breaks), because a paraphrase of a
-// response shape is what caused the bugs this exists to prevent. Normal HTML
-// rendering would collapse exactly the whitespace we're trying to inspect.
-export function renderProbe(container, reports) {
-  const list = container.querySelector('ul');
-  list.innerHTML = '';
-  if (!reports.length) {
-    container.hidden = true;
-    return;
-  }
-  container.hidden = false;
-  const ok = reports.filter((r) => r.outcome === 'ok').length;
-  container.querySelector('summary').textContent = `Connector probe — ${ok}/${reports.length} call${reports.length === 1 ? '' : 's'} succeeded`;
-
-  const ICON = { ok: '✓', 'tool-error': '⚠', unreachable: '✗' };
-
-  for (const report of reports) {
-    const li = document.createElement('li');
-
-    const heading = document.createElement('div');
-    heading.className = 'jg-probe-name';
-    // Args are part of the identity of the attempt: the same name can fail
-    // with one signature and succeed with another, and that difference is
-    // the finding.
-    heading.textContent = `${ICON[report.outcome] ?? '?'} ${report.name}  ${JSON.stringify(report.args)}`;
-    li.appendChild(heading);
-
-    const body = document.createElement('pre');
-    body.className = 'jg-probe-body';
-    body.textContent = report.outcome === 'ok'
-      ? [
-        `unwrapped type: ${report.shape.unwrappedType}`,
-        `envelope keys:  ${report.shape.unwrappedKeys ? JSON.stringify(report.shape.unwrappedKeys) : '(not an object)'}`,
-        `string-valued:  ${report.shape.stringValuedKeys ? JSON.stringify(report.shape.stringValuedKeys) : '(n/a)'}`,
-        `structuredContent: ${report.shape.hasStructuredContent}  content[0].text: ${report.shape.contentTextType}`,
-      ].join('\n')
-      : report.outcome === 'tool-error'
-        ? `tool was reached but refused the call:\n${report.error}`
-        : `call could not be made at all:\n${report.error}`;
-    li.appendChild(body);
-
-    // Each string payload verbatim, with real line breaks — this is the
-    // block to read when the response is prose, since the JSON dump below
-    // escapes exactly the newlines and quoting being inspected.
-    for (const payload of report.shape?.payloadPreviews ?? []) {
-      const label = document.createElement('div');
-      label.className = 'jg-probe-sublabel';
-      label.textContent = `literal payload — ${payload.key}:`;
-      li.appendChild(label);
-
-      const pre = document.createElement('pre');
-      pre.className = 'jg-probe-body jg-probe-literal';
-      pre.textContent = payload.text;
-      li.appendChild(pre);
-    }
-
-    // Shown for tool-errors too, not just successes — a refusal's raw body
-    // often carries the actual reason (an allowlist name, a validation
-    // message) that the summary line alone would lose.
-    if (report.shape) {
-      const label = document.createElement('div');
-      label.className = 'jg-probe-sublabel';
-      label.textContent = 'raw response (JSON-escaped):';
-      li.appendChild(label);
-
-      const pre = document.createElement('pre');
-      pre.className = 'jg-probe-body';
-      pre.textContent = report.shape.rawJson;
-      li.appendChild(pre);
-    }
-
-    list.appendChild(li);
-  }
-}
 
 export function nextStatus(status) {
   const idx = STATUS_CYCLE.indexOf(status);
@@ -281,9 +205,9 @@ export function renderCard(container, task, handlers) {
 }
 
 // One paste-back-able report instead of "screenshot the errors dropdown,
-// then the candidates panel, then the probe panel, then tell me the date
-// field's value" — reads straight off the DOM, so it always matches exactly
-// what's currently on screen rather than a separately-tracked copy of it.
+// then the candidates panel, then tell me the date field's value" — reads
+// straight off the DOM, so it always matches exactly what's currently on
+// screen rather than a separately-tracked copy of it.
 export function buildDebugSnapshot(doc) {
   const lines = [`Task Juggler debug snapshot — ${new Date().toISOString()}`, ''];
 
@@ -308,19 +232,5 @@ export function buildDebugSnapshot(doc) {
       for (const li of group.querySelectorAll('li')) lines.push(`  - ${li.textContent.trim()}`);
     }
   }
-  lines.push('');
-
-  lines.push('--- Last connector probe ---');
-  const probeEl = doc.getElementById('jg-probe');
-  if (!probeEl || probeEl.hidden) {
-    lines.push('(not run this session — click Probe first if relevant)');
-  } else {
-    // Preserved verbatim, not trimmed to one line — the probe's whole point
-    // is the literal formatting of a raw connector response.
-    for (const li of probeEl.querySelectorAll(':scope > ul > li')) {
-      lines.push(`* ${li.textContent.trim()}`);
-    }
-  }
-
   return lines.join('\n');
 }

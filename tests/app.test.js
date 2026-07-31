@@ -149,6 +149,25 @@ describe('createApp.refreshAll', () => {
     await app.refreshAll({ force: true });
     expect(maxInFlight).toBeLessThanOrEqual(3);
   });
+
+  it('a hung Linear AI refresh times out and reports an error for that task, instead of hanging refreshAll forever', async () => {
+    vi.useFakeTimers();
+    storage.setItem('task-juggler:tasks:v1', JSON.stringify([
+      linearTask({ id: 'hangs', contextHash: 'stale', title: 'Slow Linear task' }),
+    ]));
+    const callMcpTool = vi.fn().mockResolvedValue({ structuredContent: acmeIssue, isError: false });
+    const askClaude = vi.fn(() => new Promise(() => {})); // never resolves
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
+
+    const resultPromise = app.refreshAll({ force: true });
+    await vi.advanceTimersByTimeAsync(60_000);
+    const { results, errors } = await resultPromise;
+
+    expect(results[0].aiCalled).toBe(false);
+    expect(errors[0]).toContain('Slow Linear task');
+    expect(errors[0]).toContain('timed out after 60000ms');
+    vi.useRealTimers();
+  });
 });
 
 describe('createApp manual operations', () => {
@@ -255,6 +274,49 @@ describe('createApp.discoverNewTasks', () => {
     const second = await app.discoverNewTasks();
     expect(second.added).toBe(0);
     expect(app.getTasks()).toHaveLength(1);
+  });
+
+  // Dismissal coverage, moved here from the now-deleted dismissal.test.js:
+  // that file tested this exclusively via Claude session discovery, which no
+  // longer runs from the artifact (see SKILL.md) — Linear is the vehicle now,
+  // but the thing being verified (dismissal blocks re-add; undismissAll lifts
+  // it) is the same generic mechanism every source shares.
+  it('a dismissed Linear issue is not re-added by a later scan, even though it is still unresolved', async () => {
+    const callMcpTool = mockCallMcpTool({ linearIssues: [{ ...acmeIssue, statusType: 'triage' }] });
+    const app = createApp({ storage, callMcpTool, askClaude: vi.fn(), toolNames: TOOL_NAMES });
+
+    await app.discoverNewTasks();
+    expect(app.getTasks()).toHaveLength(1);
+
+    app.remove(app.getTasks()[0].id);
+    expect(app.getTasks()).toHaveLength(0);
+
+    const { added } = await app.discoverNewTasks();
+    expect(added).toBe(0);
+    expect(app.getTasks()).toHaveLength(0);
+  });
+
+  it('dismissing a manual task does not block unrelated Linear discovery', async () => {
+    const callMcpTool = mockCallMcpTool({ linearIssues: [{ ...acmeIssue, statusType: 'triage' }] });
+    const app = createApp({ storage, callMcpTool, askClaude: vi.fn(), toolNames: TOOL_NAMES });
+
+    const manual = app.addManualTask('unrelated');
+    app.remove(manual.id);
+
+    const { added } = await app.discoverNewTasks();
+    expect(added).toBe(1);
+  });
+
+  it('undismissAll lets a previously dismissed Linear issue be discovered again', async () => {
+    const callMcpTool = mockCallMcpTool({ linearIssues: [{ ...acmeIssue, statusType: 'triage' }] });
+    const app = createApp({ storage, callMcpTool, askClaude: vi.fn(), toolNames: TOOL_NAMES });
+
+    await app.discoverNewTasks();
+    app.remove(app.getTasks()[0].id);
+    app.undismissAll();
+
+    const { added } = await app.discoverNewTasks();
+    expect(added).toBe(1);
   });
 });
 
@@ -621,40 +683,6 @@ describe('createApp resilience — one failing connector must not block the othe
     expect(errors).toEqual(['Todoist: connector invalidated, needs reconnect']);
   });
 
-  it('the Claude session list call throwing reports its own error without blocking Linear/Todoist', async () => {
-    const sessionToolNames = { ...TOOL_NAMES, sessionList: 'mcp__ccd__list_sessions', sessionEvents: 'mcp__ccd__list_events' };
-    const callMcpTool = vi.fn(async (name) => {
-      if (name === `${TOOL_NAMES.linearWorkspaces.Acme}list_issues`) return { structuredContent: { issues: [] }, isError: false };
-      if (name === TOOL_NAMES.todoistFindTasks) return { structuredContent: { tasks: [] }, isError: false };
-      if (name === 'mcp__ccd__list_sessions') throw new Error('connector invalidated, needs reconnect');
-      throw new Error(`unexpected tool call: ${name}`);
-    });
-    const app = createApp({ storage, callMcpTool, askClaude: vi.fn(), toolNames: sessionToolNames });
-    const { errors } = await app.discoverNewTasks();
-    expect(errors).toEqual(['Claude sessions: connector invalidated, needs reconnect']);
-  });
-
-  it('one session\'s event-tail fetch throwing only skips that session, not the rest of the batch', async () => {
-    const sessionToolNames = { ...TOOL_NAMES, sessionList: 'mcp__ccd__list_sessions', sessionEvents: 'mcp__ccd__list_events' };
-    const goodSession = { sessionId: 'good', title: 'Good session', cwd: '/x', isArchived: false, isRunning: false, lastActivityAt: '2026-07-25T04:41:50.813Z' };
-    const badSession = { sessionId: 'bad', title: 'Bad session', cwd: '/x', isArchived: false, isRunning: false, lastActivityAt: '2026-07-25T04:41:50.813Z' };
-    const callMcpTool = vi.fn(async (name, args) => {
-      if (name === `${TOOL_NAMES.linearWorkspaces.Acme}list_issues`) return { structuredContent: { issues: [] }, isError: false };
-      if (name === TOOL_NAMES.todoistFindTasks) return { structuredContent: { tasks: [] }, isError: false };
-      if (name === 'mcp__ccd__list_sessions') return { structuredContent: [goodSession, badSession], isError: false };
-      if (name === 'mcp__ccd__list_events' && args.session_id === 'bad') throw new Error('transcript read failed');
-      if (name === 'mcp__ccd__list_events') return { content: [{ text: 'Real progress, but needs you: click Add Tax Info.' }], isError: false };
-      throw new Error(`unexpected tool call: ${name}`);
-    });
-    const askClaude = vi.fn().mockResolvedValue(JSON.stringify({ needsAttention: true, waitingOn: 'user', reason: 'needs input' }));
-    const app = createApp({ storage, callMcpTool, askClaude, toolNames: sessionToolNames, now: () => new Date('2026-07-25T12:00:00Z') });
-    const { added, errors } = await app.discoverNewTasks();
-
-    expect(added).toBe(1);
-    expect(app.getTasks()[0].sourceRef.sessionId).toBe('good');
-    expect(errors).toEqual([]); // a per-session skip isn't surfaced as a source-level error
-  });
-
   it('a Linear task refresh throwing is reported per-task without blocking other tasks in the same refreshAll batch', async () => {
     storage.setItem('task-juggler:tasks:v1', JSON.stringify([
       linearTask({ id: 'broken', contextHash: 'stale', title: 'Broken Linear task' }),
@@ -804,63 +832,35 @@ describe('createApp resilience — one failing connector must not block the othe
     expect(result.added).toBe(2); // both threads still classified correctly
     expect(result.errors).toEqual([]); // the recovered batch reports no error — only a true dead end would
   });
-});
 
-// Built directly from a real probe run inside a deployed Cowork artifact,
-// which returned two DIFFERENT failures that a naive probe conflated:
-// session_info answered "Tool call failed: 400" (reached, refused the
-// arguments) while ccd_session_mgmt answered "not in this artifact's
-// mcp_tools allowlist" (refused outright, arguments irrelevant).
-describe('createApp.probeSessionTools', () => {
-  let storage;
-  beforeEach(() => { storage = fakeStorage(); });
-
-  const PROBE_TOOL_NAMES = { ...TOOL_NAMES, sessionList: '', sessionEvents: '' };
-
-  it('retries other argument shapes when a reachable tool rejects the first one, and stops at the one that works', async () => {
-    const callMcpTool = vi.fn(async (name, args) => {
-      if (name !== 'mcp__session_info__list_sessions') {
-        return { content: [{ text: 'nope' }], isError: true };
-      }
-      // Mirrors the real 400: the tool is allowed, the arguments are not.
-      if (Object.keys(args).length > 0) {
-        return { content: [{ type: 'text', text: 'Tool call failed: 400 ' }], isError: true };
-      }
-      return { content: [{ type: 'text', text: 'Sessions (2 of 195)\n - abc "T" (idle, cwd: /x, is_child: false)\n' }], isError: false };
-    });
-    const app = createApp({ storage, callMcpTool, askClaude: vi.fn(), toolNames: PROBE_TOOL_NAMES });
-    const reports = await app.probeSessionTools();
-
-    const sessionInfo = reports.filter((r) => r.name === 'mcp__session_info__list_sessions');
-    expect(sessionInfo.map((r) => r.outcome)).toEqual(['tool-error', 'ok']);
-    expect(sessionInfo[1].args).toEqual({});
-    // Stopped once it worked rather than grinding through every variant.
-    expect(sessionInfo).toHaveLength(2);
-    expect(sessionInfo[1].shape.payloadPreviews[0].text).toContain('is_child: false');
-  });
-
-  it('does not retry argument variants against an allowlist refusal — the arguments are not the problem', async () => {
-    const allowlistText = 'Tool "mcp__ccd_session_mgmt__list_sessions" is not in this artifact\'s mcp_tools allowlist.';
+  // Real production report: widening the Slack lookback pulled in a larger
+  // batch, and the refresh just sat at "Refresh…" forever with no error ever
+  // appearing. Root cause: askClaude was never bounded by anything, so a
+  // bridge call that hangs instead of rejecting had no way to ever surface
+  // as a failure. This locks in the fix — the call must give up and report,
+  // not hang.
+  it('a hung Slack classification call times out instead of leaving the refresh stuck forever with no error', async () => {
+    vi.useFakeTimers();
+    const searchText = [
+      'Channel: #engineering (ID: C01EXAMPLE1)',
+      'Permalink: [link](https://acme.slack.com/archives/C01EXAMPLE1/p1784833812477119?thread_ts=1784829904.373009&cid=C01EXAMPLE1)',
+    ].join('\n');
     const callMcpTool = vi.fn(async (name) => {
-      if (name === 'mcp__ccd_session_mgmt__list_sessions') {
-        return { content: [{ type: 'text', text: allowlistText }], isError: true };
+      if (name === TOOL_NAMES.slackSearch) return { content: [{ text: searchText }], isError: false };
+      if (name === TOOL_NAMES.slackReadThread) {
+        return { content: [{ text: JSON.stringify({ messages: slackThread.rawText, pagination_info: slackThread.paginationInfo }) }], isError: false };
       }
-      return { content: [{ type: 'text', text: 'Tool call failed: 400 ' }], isError: true };
+      throw new Error(`unexpected tool call: ${name}`);
     });
-    const app = createApp({ storage, callMcpTool, askClaude: vi.fn(), toolNames: PROBE_TOOL_NAMES });
-    const reports = await app.probeSessionTools();
+    const askClaude = vi.fn(() => new Promise(() => {})); // never resolves — the reported symptom exactly
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
 
-    const ccd = reports.filter((r) => r.name === 'mcp__ccd_session_mgmt__list_sessions');
-    expect(ccd).toHaveLength(1);
-    expect(ccd[0].outcome).toBe('tool-error');
-    expect(ccd[0].error).toContain('allowlist');
-  });
+    const resultPromise = app.runSlackTriage({ force: true });
+    await vi.advanceTimersByTimeAsync(60_000);
+    const result = await resultPromise;
 
-  it('reports zero successes when every call fails, rather than counting refusals as reachable', async () => {
-    const callMcpTool = vi.fn(async () => ({ content: [{ type: 'text', text: 'Tool call failed: 400 ' }], isError: true }));
-    const app = createApp({ storage, callMcpTool, askClaude: vi.fn(), toolNames: PROBE_TOOL_NAMES });
-    const reports = await app.probeSessionTools();
-    expect(reports.length).toBeGreaterThan(0);
-    expect(reports.filter((r) => r.outcome === 'ok')).toHaveLength(0);
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(result.errors[0]).toContain('timed out after 60000ms');
+    vi.useRealTimers();
   });
 });

@@ -16,10 +16,8 @@ function domFixture() {
     <label id="jg-lookback-label" for="jg-lookback-input"></label>
     <input type="date" id="jg-lookback-input" />
     <button id="jg-refresh-btn"></button>
-    <button id="jg-probe-btn"></button>
     <button id="jg-copy-debug-btn"></button>
     <span id="jg-status"></span>
-    <details id="jg-probe" hidden><summary></summary><ul></ul></details>
     <textarea id="jg-debug-fallback" readonly hidden></textarea>
     <div id="jg-list"></div>
     <div id="jg-card" hidden></div>
@@ -35,7 +33,6 @@ function fakeApp(overrides = {}) {
     runSlackTriage: vi.fn().mockResolvedValue({
       skipped: false, scanned: 0, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false,
     }),
-    probeSessionTools: vi.fn().mockResolvedValue([]),
     getSlackLookbackDate: vi.fn().mockReturnValue(null),
     setSlackLookbackDate: vi.fn(),
     addManualTask: vi.fn(),
@@ -180,10 +177,7 @@ describe('mountApp', () => {
       }),
       discoverNewTasks: vi.fn().mockResolvedValue({
         added: 1, errors: [],
-        detected: {
-          claude: [{ key: 'claude_session:s1', label: 'Payments webhook retry backoff', outcome: 'added' }],
-          linear: [],
-        },
+        detected: { linear: [] },
       }),
     });
     mountApp(document, app);
@@ -203,56 +197,16 @@ describe('mountApp', () => {
       '[skipped-resolved] thanks, all set',
     ]);
 
+    // Claude discovery never runs from the artifact (see SKILL.md) — this
+    // group always shows a fixed pointer to the chat-driven flow instead of
+    // a live per-scan result, regardless of what discoverNewTasks returns.
     const claudeGroup = candidatesEl.querySelector('[data-group="claude"]');
     expect(claudeGroup.querySelector('summary').textContent).toContain('Claude (1)');
+    expect(claudeGroup.querySelector('li').textContent).toContain('scan my Claude sessions');
 
     const linearGroup = candidatesEl.querySelector('[data-group="linear"]');
     expect(linearGroup.querySelector('summary').textContent).toContain('Linear (0)');
     expect(linearGroup.querySelector('li').textContent).toBe('none this scan');
-  });
-
-  it('clicking Probe calls probeSessionTools and opens the panel with the raw result', async () => {
-    const app = fakeApp({
-      probeSessionTools: vi.fn().mockResolvedValue([
-        { name: 'mcp__session_info__list_sessions', args: { limit: 3 }, outcome: 'unreachable', error: 'No such tool available', shape: null },
-        { name: 'mcp__ccd_session_mgmt__list_sessions', args: { limit: 3 }, outcome: 'ok', error: null, shape: {
-          isError: false, hasStructuredContent: true, contentTextType: 'undefined',
-          unwrappedType: 'array', unwrappedKeys: null, stringValuedKeys: null,
-          payloadPreviews: [], rawJson: '[]',
-        } },
-      ]),
-    });
-    mountApp(document, app);
-    document.getElementById('jg-probe-btn').click();
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(app.probeSessionTools).toHaveBeenCalledTimes(1);
-    const probeEl = document.getElementById('jg-probe');
-    expect(probeEl.hidden).toBe(false);
-    expect(probeEl.open).toBe(true); // opened for the user, since they explicitly asked for it
-    expect(probeEl.textContent).toContain('No such tool available');
-    expect(document.getElementById('jg-status').textContent).toContain('1 succeeded');
-  });
-
-  it('the auto-refresh tick never probes — probing deliberately calls tools that may not exist', () => {
-    vi.useFakeTimers();
-    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
-    const app = fakeApp();
-    mountApp(document, app, { autoRefreshMs: 1000 });
-    vi.advanceTimersByTime(5000);
-    expect(app.probeSessionTools).not.toHaveBeenCalled();
-    vi.useRealTimers();
-  });
-
-  it('in offline mode, Probe says so instead of calling a nonexistent bridge', async () => {
-    const app = fakeApp();
-    mountApp(document, app, { offline: true });
-    document.getElementById('jg-probe-btn').click();
-    await Promise.resolve();
-    expect(app.probeSessionTools).not.toHaveBeenCalled();
-    expect(document.getElementById('jg-status').textContent).toContain('no connectors to probe');
   });
 
   it('populates the lookback input from the stored override on mount', () => {
@@ -343,22 +297,12 @@ describe('mountApp', () => {
       expect(document.getElementById('jg-debug-fallback').hidden).toBe(false);
     });
 
-    it('includes the errors dropdown, candidates panel, and probe results verbatim in the snapshot', async () => {
+    it('includes the errors dropdown and candidates panel verbatim in the snapshot', async () => {
       const app = fakeApp({
         discoverNewTasks: vi.fn().mockResolvedValue({ added: 0, errors: ['Linear (Acme): connector error'] }),
-        probeSessionTools: vi.fn().mockResolvedValue([
-          { name: 'mcp__session_info__list_sessions', args: {}, outcome: 'tool-error', error: 'Tool call failed: 400 ', shape: {
-            isError: true, hasStructuredContent: false, contentTextType: 'string',
-            unwrappedType: 'null', unwrappedKeys: null, stringValuedKeys: null, payloadPreviews: [], rawJson: '{}',
-          } },
-        ]),
       });
       mountApp(document, app);
       document.getElementById('jg-refresh-btn').click();
-      await Promise.resolve();
-      await Promise.resolve();
-      document.getElementById('jg-probe-btn').click();
-      await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
 
@@ -367,7 +311,6 @@ describe('mountApp', () => {
 
       const fallback = document.getElementById('jg-debug-fallback');
       expect(fallback.value).toContain('Linear (Acme): connector error');
-      expect(fallback.value).toContain('tool was reached but refused the call');
     });
   });
 

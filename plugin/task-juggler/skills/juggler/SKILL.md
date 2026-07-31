@@ -55,35 +55,33 @@ instance-specific prefixes (e.g. `mcp__<uuid>__slack_read_thread`):
   tail-reading counterpart, but its shape is NOT verified — probe it the same
   way before writing anything against it.
 
-  **The critical finding: `session_info__list_sessions` works fine from chat
-  and fails from inside the artifact, with the exact same arguments.** Called
-  from chat with `{ limit: 3 }`, it returns real session data. Called from
-  inside the artifact via `callMcpTool` with the identical arguments, it
-  returns `Tool call failed: 400` — a bare, contentless refusal, not the
-  labeled `"...not in this artifact's mcp_tools allowlist"` message a genuine
-  allowlist rejection gives (see below). Since every other source (Slack,
-  Linear, Todoist) calls tools from inside this same artifact successfully,
-  this isn't a general sandbox limitation — it looks like a deliberate,
-  tool-specific restriction on enumerating a user's full cross-session list
-  from a less-trusted artifact context, which makes sense: that's a much
-  broader disclosure surface (every session title and working directory on
-  the user's machine) than one Slack workspace or Linear project. Don't spend
-  time trying to route around this from the artifact side — **Claude session
-  discovery has to run in chat**, via the deep-scan flow below, and inject
-  results as seed tasks the same way add-by-link already does. The artifact's
-  own `discoverClaudeSessionCandidates` (`src/app.js`) should stay disabled;
-  this isn't a bug in it, it's a platform boundary outside its reach.
+  **Settled finding, confirmed twice: `session_info__list_sessions` works
+  fine from chat and fails from inside the artifact, with the exact same
+  arguments.** Called from chat with `{ limit: 3 }` (and with `{}`, and with
+  `{ limit: "3" }`), it returns real session data every time. Called from
+  inside a deployed artifact via `callMcpTool` with those identical
+  arguments, it returned `Tool call failed: 400` every time — a bare,
+  contentless refusal, not the labeled
+  `"...not in this artifact's mcp_tools allowlist"` message a genuine
+  allowlist rejection gives (`ccd_session_mgmt`, tried from the same artifact,
+  gave that exact labeled message instead, since it isn't declared in
+  `mcp_tools` at all). Since every other source (Slack, Linear, Todoist)
+  calls tools from inside this same artifact successfully, this isn't a
+  general sandbox limitation — it looks like a deliberate, tool-specific
+  restriction on enumerating a user's full cross-session list from a
+  less-trusted artifact context, which makes sense: that's a much broader
+  disclosure surface (every session title and working directory on the
+  user's machine) than one Slack workspace or Linear project.
 
-  **The `mcp_tools` allowlist is a separate, distinct hard gate.** A tool
-  absent from the allowlist declared at `create_artifact` time is refused
-  before the call happens, with
-  `Tool "<name>" is not in this artifact's mcp_tools allowlist.` — verified
-  from inside a deployed artifact. Retrying with different arguments never
-  helps there either; the name has to be added to `mcp_tools`. Tell the two
-  apart by the message: a labeled allowlist rejection names the allowlist
-  explicitly, the artifact-scoping restriction above does not. The **Probe**
-  button in the artifact distinguishes these automatically and sweeps a few
-  argument shapes, which is how the finding above was confirmed.
+  This is a closed question, not an open one — don't spend time re-probing it
+  or trying to route around it from the artifact side. **Claude session
+  discovery only ever runs in chat**, via the deep-scan flow below, injecting
+  results as seed tasks the same way add-by-link already does. There used to
+  be artifact-side code and a Probe button for this; both were removed once
+  the platform restriction was confirmed stable rather than left as dead
+  weight pointed at a permanent dead end. If a future host or config change
+  ever lets an artifact call `session_info` successfully, that would be worth
+  re-adding — but don't assume it without a fresh probe first.
 
 ## Create or repair the artifact
 
@@ -96,22 +94,16 @@ instance-specific prefixes (e.g. `mcp__<uuid>__slack_read_thread`):
      slackReadThread: "mcp__...__slack_read_thread",
      slackSearch:     "mcp__...__slack_search_public_and_private",
      todoistFindTasks:"mcp__...__find-tasks",
-     sessionList:     "mcp__...__list_sessions",   // whichever server exists
-     sessionEvents:   "mcp__...__list_events",     // (see the probe note above)
-     // Extra names for the Probe button to try, beyond the built-in
-     // candidates — handy when a host renames a server.
-     sessionProbeNames: [],
      linearWorkspaces: { "Acme": "mcp__...__", "Globex": "mcp__...__" },
    };
    ```
-   Any name left empty just disables that source — the artifact degrades
-   gracefully rather than erroring, so a missing connector is survivable.
+   No session-related names here — the artifact never calls a session tool
+   at all (see above). Any other name left empty just disables that source —
+   the artifact degrades gracefully rather than erroring, so a missing
+   connector is survivable.
 3. Call `mcp__cowork__create_artifact` (first run) or `update_artifact` (repair)
-   with this HTML and the `mcp_tools` list containing every probed tool name.
-   **`mcp_tools` is the gate**: anything omitted here is refused at call time
-   no matter what `__JUGGLER_TOOL_NAMES__` says, so include every session
-   tool candidate you want the Probe button to be able to reach — otherwise
-   the probe can only ever report an allowlist refusal for it.
+   with this HTML and the `mcp_tools` list containing every probed tool name
+   (Slack, Linear, Todoist only).
 4. Confirm to the user that the artifact was created/updated and that its state
    (via `localStorage`) persists across sessions.
 
@@ -150,8 +142,33 @@ Slack/Linear for stuff I'm missing"):
    any thread not already represented in the artifact's current task list.
 2. For each connected Linear workspace: `list_issues` with `assignee: "me"`,
    filter to unresolved states, skip issues already present as tasks.
-3. If session tools are available, check recent Claude/Claude Code sessions for
-   ones that look unfinished.
+3. Claude sessions — **this step only runs here, in chat; the artifact
+   cannot do it itself** (see the settled finding above: session-listing
+   tools fail specifically from inside the artifact bridge, even correctly
+   configured).
+   1. Call whichever session-list tool is present
+      (`ccd_session_mgmt.list_sessions` or `session_info.list_sessions`),
+      `{ limit: 20 }` or similar.
+   2. For `ccd_session_mgmt`: parse the real JSON array
+      (`{sessionId, title, cwd, isArchived, isRunning, lastActivityAt}`),
+      skip `isArchived` and anything with `lastActivityAt` older than ~72h.
+   3. For `session_info`: parse the prose, one session per line matching
+      ` - <id> "<title>" (<status>, cwd: <path>, is_child: <bool>)`. There's
+      no timestamp field at all here — use "most recent first" ordering
+      plus a count cutoff (e.g. only consider the first ~15-20 listed) as
+      the staleness proxy instead of a date comparison.
+   4. Skip anything already present in the artifact's current task list
+      (match by `sessionId`) or on its dismissed list, same as any other
+      source.
+   5. For each remaining candidate, read its transcript tail
+      (`read_transcript` / `list_events` — this shape is NOT verified,
+      probe it fresh before relying on it) and judge directly, as part of
+      this same chat turn, whether it looks unfinished and who it's
+      waiting on. No separate AI call needed — you're already doing the
+      judging.
+   6. Shape anything genuinely unfinished as
+      `{ title, source: "claude_session", sourceRef: { sessionId, cwd },
+      summary, waitingOn, ballInUsersCourt: waitingOn === "user" }`.
 4. Build seed task objects for everything new, and inject them via
    `update_artifact` exactly as in the add-by-link flow (merge into the seed
    script tag — over-including is safe since dedup happens on load; missing
@@ -161,20 +178,26 @@ Slack/Linear for stuff I'm missing"):
 ## What the artifact does on its own (don't duplicate it here)
 
 Once created, the artifact self-polls every 5 minutes while it's open and
-visible, and on every Refresh click: it discovers new Slack threads, Linear
-issues, Todoist items, and Claude Desktop sessions directly via
-`callMcpTool`, and refreshes tracked tasks. It does this without any skill
-involvement — the artifact cannot invoke a skill, so it was built not to need
-one.
+visible, and on every Refresh click: it discovers new Slack threads and
+Linear/Todoist items directly via `callMcpTool`, and refreshes tracked
+tasks. It does this without any skill involvement — the artifact cannot
+invoke a skill, so it was built not to need one for those three sources.
+
+Claude sessions are the one source this does NOT cover — deliberately, not
+by oversight (see "Probe before you build" above). The artifact has no
+session-discovery code and no session-related UI at all; that entire
+source only exists via the deep-scan chat flow below.
 
 Two behaviors worth knowing before you "help":
 - **Dismissal is permanent.** Deleting a task records its identity on a
   dismissed list; discovery will never resurface it. Never re-add something
   the user dismissed, and don't "helpfully" clear the dismissed list.
-- **Watermarks prevent re-judging.** Each source records a change signal
-  (session `lastActivityAt`, Slack thread ts, Linear `updatedAt`). Unchanged
-  items never reach an LLM again. Injecting seed tasks by hand bypasses this,
-  so prefer letting the artifact discover things itself.
+- **Watermarks prevent re-judging.** Slack records a versioned content-hash
+  signal per thread (unchanged content never reaches an LLM again — see
+  `SLACK_JUDGMENT_VERSION` in `src/app.js` if that classification logic ever
+  changes in a way that should force a fresh look). Injecting seed tasks by
+  hand bypasses this, so prefer letting the artifact discover things itself
+  where it can (Slack, Linear, Todoist).
 
 ## Notes
 

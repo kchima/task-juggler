@@ -140,74 +140,10 @@ export function extractSlackThreadRefs(searchResultText) {
   return [...refs.values()];
 }
 
-// --- Claude Desktop (CCD) sessions ---------------------------------------
-// Live-verified shape from mcp__ccd_session_mgmt__list_sessions:
-// { sessionId, title, cwd, isArchived, isRunning, lastActivityAt }
-
-// Sessions the user hasn't touched in a long while aren't "in flight" in any
-// useful sense — this is a short-term workflow surface, not an archive. A
-// cheap deterministic filter here means those never cost an LLM call at all.
-const SESSION_STALE_AFTER_HOURS = 72;
-
-export function isCandidateClaudeSession(session, now = new Date()) {
-  if (session.isArchived) return false;
-  if (!session.lastActivityAt) return false;
-  const hoursSince = (now - new Date(session.lastActivityAt)) / (1000 * 60 * 60);
-  return hoursSince <= SESSION_STALE_AFTER_HOURS;
-}
-
-export function claudeSessionCandidateToTask(session, judgment) {
-  return {
-    title: session.title,
-    source: 'claude_session',
-    sourceRef: { sessionId: session.sessionId, cwd: session.cwd },
-    summary: judgment?.reason ?? '',
-    waitingOn: judgment?.waitingOn ?? null,
-    ballInUsersCourt: judgment?.waitingOn === 'user',
-  };
-}
-
-export function buildSessionJudgmentPrompt(session, transcriptTail) {
-  return [
-    "You are triaging the tail of an AI coding/work session transcript to decide if it's an open loop.",
-    'Respond with STRICT JSON ONLY — no prose, no markdown code fences — matching exactly:',
-    '{"needsAttention": true, "waitingOn": "user|ai|other", "reason": "one short sentence"}',
-    'needsAttention is true only if the work is unfinished AND someone still has to act.',
-    'waitingOn is "user" if the assistant asked a question, requested a decision, or handed a step back to the human;',
-    '"ai" if the assistant was still mid-task; "other" if it is blocked on a third party.',
-    'If the session reads as finished and resolved, needsAttention is false.',
-    `Session title: ${session.title}`,
-    `Transcript tail:\n${transcriptTail}`,
-  ].join('\n');
-}
-
-export function parseSessionJudgment(rawText) {
-  try {
-    const parsed = JSON.parse(stripSlackJsonCodeFences(rawText));
-    if (typeof parsed.needsAttention !== 'boolean') return null;
-    const waitingOn = ['user', 'ai', 'other'].includes(parsed.waitingOn) ? parsed.waitingOn : null;
-    return {
-      needsAttention: parsed.needsAttention,
-      waitingOn,
-      reason: typeof parsed.reason === 'string' ? parsed.reason : '',
-    };
-  } catch {
-    return null;
-  }
-}
-
-// --- Watermarks -----------------------------------------------------------
-// The change signal per source: if this string is unchanged since the last
-// scan, nothing about the item has changed, so it must not reach an LLM.
-
-export function changeSignalFor(source, item) {
-  if (source === 'claude_session') return `${item.lastActivityAt}`;
-  if (source === 'linear') return `${item.updatedAt}`;
-  if (source === 'slack') return `${item.latestTs ?? item.threadTs}`;
-  if (source === 'todoist') return `${item.dueDate ?? ''}:${item.priority ?? ''}`;
-  return '';
-}
-
-export function isUnchangedSinceLastScan(key, signal, watermarks) {
-  return Boolean(signal) && watermarks[key] === signal;
-}
+// Claude Desktop / Cowork session discovery deliberately does NOT live here.
+// A live probe from inside a deployed artifact confirmed session-listing
+// tools are blocked at the artifact-bridge layer (a bare "Tool call failed:
+// 400" for session_info, reachable and correctly configured, with identical
+// arguments that succeed fine from chat) — so that discovery has to run via
+// the juggler skill's chat-driven deep-scan flow instead of from in here.
+// See the "Claude Desktop / Cowork sessions" note in the skill's SKILL.md.

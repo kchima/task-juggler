@@ -1,35 +1,18 @@
 // Fixtures for the mock window.cowork runtime, wrapped in the documented
 // { content, structuredContent, isError } envelope. Real captured data — see
 // tests/fixtures/*.json for provenance notes.
+// No session-related names here — the artifact never calls a session tool
+// at all (Claude session discovery only runs via the juggler skill's
+// chat-driven deep-scan flow; see SKILL.md).
 export const MOCK_TOOL_NAMES = {
   slackReadThread: 'mcp__mockslack__slack_read_thread',
   slackSearch: 'mcp__mockslack__slack_search',
   todoistFindTasks: 'mcp__mocktodoist__find-tasks',
-  sessionList: 'mcp__mockccd__list_sessions',
-  sessionEvents: 'mcp__mockccd__list_events',
   linearWorkspaces: {
     Acme: 'mcp__mocklinearacme__',
     Globex: 'mcp__mocklinearglobex__',
   },
 };
-
-// Real captured shape + real transcript tail from ccd_session_mgmt.
-export const MOCK_CCD_SESSION = {
-  sessionId: 'local_00000000-0000-4000-8000-000000000002',
-  title: 'Payments webhook retry backoff',
-  cwd: '/Users/dev/workspace',
-  isArchived: false,
-  isRunning: false,
-  lastActivityAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
-};
-
-export const MOCK_CCD_SESSION_TAIL = [
-  'Session "Payments webhook retry backoff" (idle) — showing 6 of 2374 messages',
-  '[assistant] Real progress, but not fully done yet — the W-9 tax form is the one piece left,',
-  "and it's a hard line for me, so this one's yours: click \"Add Tax Info\" and complete it.",
-  "Once the tax form is in, ping me and I'll check whether the agreement flipped to Active.",
-  '[result] done (success), 4 turns',
-].join('\n');
 
 // A second, not-yet-tracked Linear issue and Slack thread + a Todoist item,
 // for exercising discoverNewTasks() live in the harness.
