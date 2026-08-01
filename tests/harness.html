@@ -12,7 +12,7 @@
     MOCK_LINEAR_DISCOVERY_ISSUE, MOCK_TODOIST_DISCOVERY_ITEM, MOCK_SLACK_DISCOVERY_THREAD,
   } from './mock-fixtures.js';
 
-  const state = { slackVersion: 1, breakLinearGlobex: false, breakSlackAskClaude: false };
+  const state = { slackVersion: 1, breakLinearGlobex: false, breakSlackAskClaude: false, hangSlackSearch: false };
   window.__JUGGLER_TOOL_NAMES__ = MOCK_TOOL_NAMES;
 
   window.__jugglerToolCalls = [];
@@ -22,6 +22,9 @@
       window.__jugglerToolCalls.push({ name, args });
       if (name === `${MOCK_TOOL_NAMES.linearWorkspaces.Globex}list_issues` && state.breakLinearGlobex) {
         throw new Error('connector invalidated, needs reconnect');
+      }
+      if (name === MOCK_TOOL_NAMES.slackSearch && state.hangSlackSearch) {
+        return new Promise(() => {}); // never resolves — reproduces the reported "stuck at Refresh…" hang
       }
       if (name === MOCK_TOOL_NAMES.slackReadThread) {
         // Real, live-captured envelope: {messages, pagination_info} serialized
@@ -107,6 +110,10 @@
   // sources.
   window.__jugglerBreakLinearGlobex = () => { state.breakLinearGlobex = true; };
   window.__jugglerBreakSlackAskClaude = () => { state.breakSlackAskClaude = true; };
+  // Reproduces the real production report: a callMcpTool call (Slack search,
+  // in this case) that hangs instead of rejecting. Before the timeout fix,
+  // this left the whole refresh stuck at "Refresh…" forever with no error.
+  window.__jugglerHangSlackSearch = () => { state.hangSlackSearch = true; };
 
   window.__jugglerErrors = [];
   window.addEventListener('error', (e) => {

@@ -46,14 +46,17 @@ const NO_REFRESH_ADAPTER_SOURCES = new Set([
   'manual', 'url', 'todoist', 'devin', 'claude_code_session', 'claude_session', 'slack',
 ]);
 
-// A real production hang was observed: widening the Slack lookback enough
-// to pull in one very large thread made the batch classification call never
-// return, with no error, because nothing bounds how long a bridge call is
-// allowed to take. There's no confirmed real latency data to tune this
-// against — the point isn't precision, it's making sure a hung call becomes
-// a bounded, visible failure (through the same errors-array path every
-// other failure already uses) instead of an unbounded, silent one.
-const ASK_CLAUDE_TIMEOUT_MS = 60_000;
+// A real production hang was observed: widening the Slack lookback made a
+// refresh sit at "Refresh…" forever with no error, because nothing bounded
+// how long a bridge call was allowed to take. The first fix only wrapped
+// askClaude — a real gap, since callMcpTool (Slack search/read, Linear,
+// Todoist) is the exact same kind of bridge call and can hang exactly the
+// same way. Every bridge call gets this now, not just the AI ones. There's
+// no confirmed real latency data to tune the number against — the point
+// isn't precision, it's making sure a hang becomes a bounded, visible
+// failure (through the same errors-array path every other failure already
+// uses) instead of an unbounded, silent one.
+const BRIDGE_CALL_TIMEOUT_MS = 60_000;
 
 function withTimeout(promise, ms, label) {
   let timer;
@@ -84,7 +87,7 @@ async function classifySlackBatch(entries, askClaude) {
   try {
     const raw = await withTimeout(
       askClaude(buildSlackBatchPrompt(entries.map((e) => ({ threadKey: e.key, rawText: e.rawText }))), []),
-      ASK_CLAUDE_TIMEOUT_MS,
+      BRIDGE_CALL_TIMEOUT_MS,
       `Slack classification (${entries.length} thread${entries.length === 1 ? '' : 's'})`
     );
     return { verdicts: parseSlackBatchVerdicts(raw) ?? new Map(), errors: [] };
@@ -165,14 +168,14 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
     }
 
     try {
-      const raw = await fetchRawContext(task, callMcpTool, toolNames);
+      const raw = await withTimeout(fetchRawContext(task, callMcpTool, toolNames), BRIDGE_CALL_TIMEOUT_MS, `Fetch (${task.title})`);
       if (raw == null) return { task, aiCalled: false };
 
       const canonical = canonicalize(task, raw);
       const newHash = djb2Hash(canonical);
       if (newHash === task.contextHash) return { task, aiCalled: false };
 
-      const aiResult = await withTimeout(refreshTaskViaAi(task, canonical, askClaude), ASK_CLAUDE_TIMEOUT_MS, `AI refresh (${task.title})`);
+      const aiResult = await withTimeout(refreshTaskViaAi(task, canonical, askClaude), BRIDGE_CALL_TIMEOUT_MS, `AI refresh (${task.title})`);
       if (!aiResult) return { task, aiCalled: true, parseFailed: true };
 
       const patch = {
@@ -228,7 +231,7 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
     const detected = [];
     for (const [workspaceLabel, prefix] of Object.entries(toolNames.linearWorkspaces ?? {})) {
       try {
-        const result = await callMcpTool(`${prefix}list_issues`, { assignee: 'me' });
+        const result = await withTimeout(callMcpTool(`${prefix}list_issues`, { assignee: 'me' }), BRIDGE_CALL_TIMEOUT_MS, `Linear (${workspaceLabel}) list_issues`);
         const issues = unwrapMcpResult(result)?.issues ?? [];
         for (const issue of issues) {
           if (isUnresolvedLinearIssue(issue)) {
@@ -249,7 +252,7 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
   async function discoverTodoistCandidates() {
     if (!toolNames.todoistFindTasks) return { candidates: [], error: null };
     try {
-      const result = await callMcpTool(toolNames.todoistFindTasks, { filter: 'today | overdue | p1', limit: 50 });
+      const result = await withTimeout(callMcpTool(toolNames.todoistFindTasks, { filter: 'today | overdue | p1', limit: 50 }), BRIDGE_CALL_TIMEOUT_MS, 'Todoist find-tasks');
       const items = unwrapMcpResult(result)?.tasks ?? [];
       return { candidates: items.filter((t) => passesTodoistGate(t, now())).map(todoistCandidateToTask), error: null };
     } catch (err) {
@@ -276,9 +279,11 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
 
     const fetched = await mapWithConcurrency([...refsByKey.entries()], CONCURRENCY, async ([key, ref]) => {
       try {
-        const threadResult = await callMcpTool(toolNames.slackReadThread, {
-          channel_id: ref.channelId, message_ts: ref.threadTs,
-        });
+        const threadResult = await withTimeout(
+          callMcpTool(toolNames.slackReadThread, { channel_id: ref.channelId, message_ts: ref.threadTs }),
+          BRIDGE_CALL_TIMEOUT_MS,
+          `Slack read_thread (${key})`
+        );
         const rawText = slackThreadText(unwrapMcpResult(threadResult));
         if (typeof rawText !== 'string') return null;
         return { key, ref, rawText, hash: djb2Hash(normalizeSlackThread(rawText)) };
@@ -408,7 +413,11 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
       const lookbackOverride = loadSlackLookbackDate(storage);
       for (const query of buildSlackRecentQueries(now(), lookbackOverride)) {
         try {
-          const searchResult = await callMcpTool(toolNames.slackSearch, { query, limit: 20 });
+          const searchResult = await withTimeout(
+            callMcpTool(toolNames.slackSearch, { query, limit: 20 }),
+            BRIDGE_CALL_TIMEOUT_MS,
+            `Slack search (${query})`
+          );
           const unwrapped = unwrapMcpResult(searchResult);
           const searchText = typeof unwrapped === 'string' ? unwrapped : (unwrapped?.results ?? '');
           for (const ref of extractSlackThreadRefs(searchText)) {

@@ -863,4 +863,31 @@ describe('createApp resilience — one failing connector must not block the othe
     expect(result.errors[0]).toContain('timed out after 60000ms');
     vi.useRealTimers();
   });
+
+  // Same symptom, different call site: the first fix only wrapped askClaude,
+  // but callMcpTool (Slack search, in this case) can hang exactly the same
+  // way and is reached earlier in the same runSlackTriage flow — so it has
+  // to be timed out too, or the whole scan sits at "Refresh…" before it ever
+  // gets far enough to call askClaude at all.
+  it('a hung Slack search call times out instead of leaving the refresh stuck forever with no error', async () => {
+    vi.useFakeTimers();
+    const callMcpTool = vi.fn((name) => {
+      if (name === TOOL_NAMES.slackSearch) return new Promise(() => {}); // never resolves
+      throw new Error(`unexpected tool call: ${name}`);
+    });
+    const askClaude = vi.fn();
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
+
+    const resultPromise = app.runSlackTriage({ force: true });
+    // Two search queries (to:me, from:me) run in sequence, each hanging and
+    // timing out independently — so this needs two rounds of advancing, not one.
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const result = await resultPromise;
+
+    expect(result.errors.length).toBe(2);
+    expect(result.errors.every((e) => e.includes('Slack search') && e.includes('timed out after 60000ms'))).toBe(true);
+    expect(askClaude).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
 });
