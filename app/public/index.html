@@ -11,11 +11,25 @@
   <header>
     <h1>Task Juggler</h1>
     <div class="header-actions">
-      <button id="newTaskBtn" class="btn primary">+ New Task</button>
+      <button id="refreshBtn" class="btn primary" title="Scan Slack, Linear, Todoist, and Devin for new tasks">⟳ Refresh</button>
+      <button id="newTaskBtn" class="btn secondary">+ New Task</button>
       <button id="importBtn" class="btn secondary">Import Legacy</button>
       <span id="taskCount" class="count-badge"></span>
     </div>
   </header>
+
+  <!-- Sources panel — collapsed by default -->
+  <section id="sourcesSection" class="sources-section">
+    <h2 class="section-title collapsible" data-target="sourcesPanel">
+      <span class="collapse-toggle">▶</span>
+      <span>Sources</span>
+      <span id="sourcesSummary" class="count-pill"></span>
+    </h2>
+    <div id="sourcesPanel" class="sources-panel collapsed">
+      <div id="sourcesLoading" class="sources-loading hidden">Scanning sources…</div>
+      <div id="sourcesContent" class="sources-content"></div>
+    </div>
+  </section>
 
   <div id="batchToolbar" class="batch-toolbar hidden">
     <span id="selectedCount">0 selected</span>

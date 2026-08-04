@@ -148,4 +148,28 @@ describe('Server API', () => {
       expect(res.status).toBe(400);
     });
   });
+
+  describe('GET /api/sources/status', () => {
+    it('returns source order and MCP status', async () => {
+      const res = await request(app).get('/api/sources/status');
+      expect(res.status).toBe(200);
+      expect(res.body.sourceOrder).toContain('slack');
+      expect(res.body.sourceOrder).toContain('linear');
+      expect(res.body.mcp).toBeDefined();
+      expect(res.body.mcp.connected).toBe(false);
+    });
+  });
+
+  describe('POST /api/sources/scan', () => {
+    it('scans all sources and returns results (no MCP connected)', async () => {
+      const res = await request(app).post('/api/sources/scan');
+      expect(res.status).toBe(200);
+      expect(res.body.results).toBeDefined();
+      expect(res.body.results.slack).toBeDefined();
+      expect(res.body.results.linear).toBeDefined();
+      expect(res.body.results.todoist).toBeDefined();
+      // All should be unconfigured since no MCP is connected
+      expect(res.body.results.slack.status).toBe('unconfigured');
+    });
+  });
 });

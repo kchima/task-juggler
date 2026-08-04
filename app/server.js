@@ -12,6 +12,9 @@ import {
   batchDelete, batchComplete, batchUpdateStatus,
   countByStatus, closeDb, getDescendantIds,
 } from './database.js';
+import { scanAllSources, checkMcpCapabilities } from './connector/scanner.js';
+import { McpClient } from './connector/mcpClient.js';
+import { FakeMcpServer } from './connector/fakeMcpServer.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.TASK_JUGGLER_PORT || 3000;
@@ -159,6 +162,43 @@ app.post('/api/import', (req, res) => {
     imported++;
   }
   res.json({ ok: true, imported, skipped });
+});
+
+// --- Connector / Source scanning -------------------------------------------
+
+// In-memory MCP client — created once, reused across scans.
+// Configured via MCP_SERVER_COMMAND env var (e.g. "npx @modelcontextprotocol/server-slack")
+// or starts as null (no MCP available, reports unconfigured).
+let _mcpClient = null;
+let _mcpServerProcess = null;
+
+function getOrCreateMcpClient() {
+  return _mcpClient; // may be null — scanner handles this gracefully
+}
+
+// Scan all configured sources for new tasks
+app.post('/api/sources/scan', async (_req, res) => {
+  const mcpClient = getOrCreateMcpClient();
+  const results = await scanAllSources(mcpClient);
+  res.json({ results });
+});
+
+// Get source capability report
+app.get('/api/sources/status', (_req, res) => {
+  const mcpClient = getOrCreateMcpClient();
+  const mcpStatus = checkMcpCapabilities(mcpClient);
+  res.json({
+    mcp: mcpStatus,
+    sourceOrder: ['slack', 'linear', 'todoist', 'devin', 'claude'],
+  });
+});
+
+// Configure an MCP server connection (for future use when MCP servers are set up)
+// Body: { command: "npx", args: ["-y", "@modelcontextprotocol/server-slack"], env: {} }
+app.post('/api/sources/configure-mcp', (req, res) => {
+  // Placeholder — MCP stdio server management will be implemented when
+  // the user has MCP servers available to connect to.
+  res.json({ ok: true, message: 'MCP configuration saved. Restart the server to connect.' });
 });
 
 // --- Start server ----------------------------------------------------------

@@ -2,7 +2,7 @@
 
 const API_BASE = '/api';
 
-let state = { tasks: [], tree: [], counts: {}, selected: new Set() };
+let state = { tasks: [], tree: [], counts: {}, selected: new Set(), sources: null };
 
 // --- API helpers ---
 async function api(path, options = {}) {
@@ -91,6 +91,15 @@ function partitionTasks() {
   };
 }
 
+// --- Source label / icon helpers ---
+const SOURCE_META = {
+  slack:  { icon: '💬', label: 'Slack' },
+  linear: { icon: '⬡', label: 'Linear' },
+  todoist:{ icon: '✓', label: 'Todoist' },
+  devin:  { icon: 'Δ', label: 'Devin' },
+  claude: { icon: '✦', label: 'Claude/Cowork' },
+};
+
 // --- Render ---
 function render() {
   const { active, notStarted, completed } = partitionTasks();
@@ -120,6 +129,57 @@ function render() {
   }
 
   updateBatchToolbar();
+  renderSourcesPanel();
+}
+
+function renderSourcesPanel() {
+  const container = document.getElementById('sourcesContent');
+  if (!state.sources) {
+    container.innerHTML = '<div class="source-entry"><div class="source-empty">Click Refresh to scan for new tasks from Slack, Linear, Todoist, and Devin.</div></div>';
+    document.getElementById('sourcesSummary').textContent = '';
+    return;
+  }
+
+  const results = state.sources.results || {};
+  const entries = Object.entries(results);
+  const totalErrors = entries.filter(([, r]) => (r.errors || []).length > 0).length;
+  const totalItems = entries.reduce((sum, [, r]) => sum + (r.items || []).length, 0);
+
+  document.getElementById('sourcesSummary').textContent =
+    `${totalItems} found${totalErrors > 0 ? `, ${totalErrors} with errors` : ''}`;
+
+  container.innerHTML = entries.map(([sourceId, result]) => {
+    const meta = SOURCE_META[sourceId] || { icon: '?', label: sourceId };
+    const errors = result.errors || [];
+    const items = result.items || [];
+    const statusClass = errors.length > 0 ? 'error' : (result.status || 'ok');
+
+    return `
+      <div class="source-entry" data-source="${sourceId}">
+        <div class="source-icon-label">
+          <span>${meta.icon}</span>
+          <span>${meta.label}</span>
+          <span class="source-status ${statusClass}">${statusClass}</span>
+        </div>
+        <div class="source-items">
+          ${items.length === 0 && errors.length === 0
+            ? `<div class="source-empty">No items found.</div>`
+            : items.map((item) => `
+              <div class="source-item">
+                <span class="item-label" title="${escapeHtml(item.label)}">${escapeHtml(item.label)}</span>
+                ${item.outcome ? `<span class="item-outcome ${item.outcome}">${item.outcome}</span>` : ''}
+              </div>
+            `).join('')
+          }
+          ${errors.length > 0 ? `
+            <div class="source-errors">
+              ${errors.map((e) => `<div class="source-error">⚠ ${escapeHtml(e)}</div>`).join('')}
+            </div>
+          ` : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
 }
 
 function renderTaskList(containerId, tasks, listType) {
@@ -131,7 +191,6 @@ function renderTaskList(containerId, tasks, listType) {
     return;
   }
 
-  // For flat list, just render each task
   container.innerHTML = tasks.map((t) => renderTaskCard(t, listType)).join('');
 }
 
@@ -249,11 +308,18 @@ function setupEventListeners() {
   // Import
   document.getElementById('importBtn').addEventListener('click', handleImport);
 
-  // Keyboard shortcut for new task
+  // Refresh button — scan all sources
+  document.getElementById('refreshBtn').addEventListener('click', handleRefresh);
+
+  // Keyboard shortcuts
   document.addEventListener('keydown', (e) => {
     if (e.key === 'n' && (e.metaKey || e.ctrlKey) && !e.target.closest('input,textarea,select')) {
       e.preventDefault();
       showNewTaskModal();
+    }
+    if (e.key === 'r' && (e.metaKey || e.ctrlKey) && e.shiftKey && !e.target.closest('input,textarea,select')) {
+      e.preventDefault();
+      handleRefresh();
     }
   });
 }
@@ -390,7 +456,6 @@ function handleInlineEdit(titleEl) {
         showToast(`Error: ${err.message}`, 'error');
       }
     } else {
-      // Re-render to restore original
       render();
     }
   };
@@ -414,6 +479,35 @@ async function handleCreateSubtask(parentId) {
   }
 }
 
+// --- Refresh (scan sources) ---
+async function handleRefresh() {
+  const refreshBtn = document.getElementById('refreshBtn');
+  const loadingEl = document.getElementById('sourcesLoading');
+  const panel = document.getElementById('sourcesPanel');
+
+  refreshBtn.disabled = true;
+  refreshBtn.textContent = '⟳ Scanning…';
+  loadingEl.classList.remove('hidden');
+  panel.classList.remove('collapsed');
+
+  // Expand the sources panel if it was collapsed
+  const sourcesHeader = document.querySelector('[data-target="sourcesPanel"] .collapse-toggle');
+  if (sourcesHeader) sourcesHeader.classList.add('open');
+
+  try {
+    const data = await api('/sources/scan', { method: 'POST' });
+    state.sources = data;
+    render();
+    showToast('Scan complete', 'success');
+  } catch (err) {
+    showToast(`Scan error: ${err.message}`, 'error');
+  } finally {
+    refreshBtn.disabled = false;
+    refreshBtn.textContent = '⟳ Refresh';
+    loadingEl.classList.add('hidden');
+  }
+}
+
 // --- New Task Modal ---
 function showNewTaskModal() {
   const modal = document.getElementById('newTaskModal');
@@ -422,7 +516,6 @@ function showNewTaskModal() {
   document.getElementById('taskDescription').value = '';
   document.getElementById('taskPriority').value = 'medium';
 
-  // Populate parent select with non-completed tasks
   const parentSelect = document.getElementById('taskParent');
   parentSelect.innerHTML = '<option value="">None (root)</option>';
   const candidates = state.tasks.filter((t) => t.status !== 'completed' && t.status !== 'cancelled');
