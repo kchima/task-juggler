@@ -11,6 +11,70 @@ const DEFAULT_TOOL_NAMES = {
   todoistFindTasks: '',
 };
 
+// Reads and validates connector configuration from the dedicated JSON block
+// in the artifact shell. Returns null when the block is absent, blank, or
+// contains invalid JSON, so callers fall back to window.__JUGGLER_TOOL_NAMES__
+// (existing injected artifacts) then DEFAULT_TOOL_NAMES.
+export function readToolConfig(doc = globalThis.document) {
+  const el = doc?.getElementById('juggler-tool-config');
+  if (!el) return null;
+  const raw = el.textContent?.trim();
+  if (!raw) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  return parsed;
+}
+
+// Validates and normalises a tool-config object, discarding unrecognised
+// fields and substituting defaults for recognised fields with invalid types.
+// Returns a complete tool-names object matching DEFAULT_TOOL_NAMES shape.
+export function validateToolConfig(config) {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return null;
+  const result = { ...DEFAULT_TOOL_NAMES };
+  if (typeof config.slackReadThread === 'string') result.slackReadThread = config.slackReadThread;
+  if (typeof config.slackSearch === 'string') result.slackSearch = config.slackSearch;
+  if (typeof config.todoistFindTasks === 'string') result.todoistFindTasks = config.todoistFindTasks;
+  if (config.linearWorkspaces && typeof config.linearWorkspaces === 'object' && !Array.isArray(config.linearWorkspaces)) {
+    const workspaces = {};
+    for (const [label, prefix] of Object.entries(config.linearWorkspaces)) {
+      if (typeof label === 'string' && typeof prefix === 'string') {
+        workspaces[label] = prefix;
+      }
+    }
+    result.linearWorkspaces = workspaces;
+  }
+  return result;
+}
+
+// Resolves the effective tool configuration from available sources in order:
+//   1. Valid config from the #juggler-tool-config JSON block (new artifacts)
+//   2. Legacy window.__JUGGLER_TOOL_NAMES__ global (existing artifacts)
+//   3. Static DEFAULT_TOOL_NAMES (all connectors disabled)
+// A blank or missing config block does not override the legacy global;
+// an explicit {} config block (valid but empty) intentionally disables all
+// sources even when a legacy global exists.
+function resolveToolConfig(doc) {
+  const config = readToolConfig(doc);
+  const legacy = typeof globalThis.__JUGGLER_TOOL_NAMES__ === 'object'
+    && globalThis.__JUGGLER_TOOL_NAMES__ !== null
+    ? globalThis.__JUGGLER_TOOL_NAMES__
+    : null;
+  if (config !== null) {
+    // Config block was present and parsed: use it (may be empty {} -> all disabled)
+    return validateToolConfig(config);
+  }
+  if (legacy !== null) {
+    // No config block; fall back to legacy global
+    return validateToolConfig(legacy);
+  }
+  return { ...DEFAULT_TOOL_NAMES };
+}
+
 // Claude session discovery doesn't run from inside the artifact at all — a
 // live probe confirmed session-listing tools are blocked at the
 // artifact-bridge layer even when correctly configured (see SKILL.md). This
@@ -33,7 +97,7 @@ export function mountApp(doc, app, options = {}) {
   // up a real interval unintentionally — the real boot() below turns it on
   // with a sensible interval. Visibility-checked so it doesn't do work while
   // the artifact tab/panel isn't actually open.
-  const { autoRefreshMs = null, offline = false } = options;
+  const { autoRefreshMs = null, offline = false, aiUnavailable = false } = options;
   let viewMode = 'list';
   let cardQueue = [];
   let cardIndex = 0;
@@ -94,6 +158,11 @@ export function mountApp(doc, app, options = {}) {
     }
     statusEl.textContent = `${statusPrefix}…`;
     try {
+      // In aiUnavailable mode (callMcpTool present but askClaude absent),
+      // Linear/Todoist discovery still works; only Slack AI classification
+      // is unavailable. The app's runSlackTriage will see askClaude throw
+      // and surface that as an error — and the UI reports it as such rather
+      // than hiding behind this catch or silently disabling Slack.
       const [refreshResult, discoverResult, slackResult] = await Promise.all([
         app.refreshAll(), app.discoverNewTasks(), app.runSlackTriage(),
       ]);
@@ -102,9 +171,10 @@ export function mountApp(doc, app, options = {}) {
       const slackNote = slackResult.scanned
         ? `, Slack: ${slackResult.scanned} scanned/${slackResult.ongoing} ongoing/${slackResult.updated} updated/${slackResult.skippedResolved} resolved`
         : '';
+      const aiNote = aiUnavailable ? ' [AI unavailable — Slack refresh limited]' : '';
       statusEl.textContent = refreshResult.skipped
         ? 'Just refreshed'
-        : `${statusPrefix}ed (${aiCalls} AI call${aiCalls === 1 ? '' : 's'}${addedNote}${slackNote})`;
+        : `${statusPrefix}ed (${aiCalls} AI call${aiCalls === 1 ? '' : 's'}${addedNote}${slackNote})${aiNote}`;
       renderErrors(doc.getElementById('jg-errors'), [
         ...(refreshResult.errors ?? []),
         ...(discoverResult.errors ?? []),
@@ -114,6 +184,7 @@ export function mountApp(doc, app, options = {}) {
         slack: slackResult.detected ?? [],
         claude: CLAUDE_SESSIONS_INFO,
         linear: discoverResult.detected?.linear ?? [],
+        todoist: discoverResult.detected?.todoist ?? [],
       });
     } catch (err) {
       // A failing connector must never take the list down with it — this
@@ -186,14 +257,21 @@ export function mountApp(doc, app, options = {}) {
 // should instead run as a perfectly good local task list: manual add, edit,
 // status, dismissal and persistence all work without any bridge — only
 // discovery and refresh need one.
+// callMcpTool and askClaude are evaluated independently: MCP-only environments
+// (callMcpTool present, askClaude absent) can still run Linear and Todoist
+// discovery; only Slack AI classification requires askClaude.
 function resolveBridge(win) {
-  if (win.cowork?.callMcpTool && win.cowork?.askClaude) {
-    return { callMcpTool: win.cowork.callMcpTool, askClaude: win.cowork.askClaude, connected: true };
-  }
+  const hasMcp = Boolean(win.cowork?.callMcpTool);
+  const hasAi = Boolean(win.cowork?.askClaude);
   const unavailable = async () => {
     throw new Error('No MCP bridge available in this environment');
   };
-  return { callMcpTool: unavailable, askClaude: unavailable, connected: false };
+  return {
+    callMcpTool: hasMcp ? win.cowork.callMcpTool : unavailable,
+    askClaude: hasAi ? win.cowork.askClaude : unavailable,
+    mcpAvailable: hasMcp,
+    aiAvailable: hasAi,
+  };
 }
 
 function boot() {
@@ -206,11 +284,13 @@ function boot() {
     storage: window.localStorage,
     callMcpTool: bridge.callMcpTool,
     askClaude: bridge.askClaude,
-    toolNames: window.__JUGGLER_TOOL_NAMES__ ?? DEFAULT_TOOL_NAMES,
+    toolNames: resolveToolConfig(document),
   });
+  const connected = bridge.mcpAvailable || bridge.aiAvailable;
   mountApp(document, app, {
-    autoRefreshMs: bridge.connected ? AUTO_REFRESH_MS : null,
-    offline: !bridge.connected,
+    autoRefreshMs: connected ? AUTO_REFRESH_MS : null,
+    offline: !bridge.mcpAvailable && !bridge.aiAvailable,
+    aiUnavailable: !bridge.aiAvailable && bridge.mcpAvailable,
   });
 }
 

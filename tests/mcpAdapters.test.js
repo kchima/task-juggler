@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { unwrapMcpResult, fetchRawContext, slackThreadText } from '../src/mcpAdapters.js';
+import { unwrapMcpResult, fetchRawContext, slackThreadText, normalizeLinearWorkspace } from '../src/mcpAdapters.js';
 import acmeIssue from './fixtures/linear-acme-issue.json' with { type: 'json' };
 import slackThread from './fixtures/slack-thread.json' with { type: 'json' };
 
@@ -116,5 +116,38 @@ describe('fetchRawContext', () => {
     expect(await fetchRawContext({ source: 'manual' }, callMcpTool, toolNames)).toBeNull();
     expect(await fetchRawContext({ source: 'url' }, callMcpTool, toolNames)).toBeNull();
     expect(callMcpTool).not.toHaveBeenCalled();
+  });
+});
+
+describe('normalizeLinearWorkspace', () => {
+  const workspaces = { Acme: 'mcp__la__', 'Global Corp': 'mcp__lg__' };
+
+  it('returns the canonical label when the input matches a configured label exactly', () => {
+    expect(normalizeLinearWorkspace('Acme', workspaces)).toBe('Acme');
+  });
+
+  it('returns the canonical label when input differs only in case', () => {
+    expect(normalizeLinearWorkspace('acme', workspaces)).toBe('Acme');
+    expect(normalizeLinearWorkspace('ACME', workspaces)).toBe('Acme');
+  });
+
+  it('returns the canonical label for a multi-word workspace matching case-insensitively', () => {
+    expect(normalizeLinearWorkspace('global corp', workspaces)).toBe('Global Corp');
+    expect(normalizeLinearWorkspace('GLOBAL CORP', workspaces)).toBe('Global Corp');
+  });
+
+  it('returns the input unchanged when no workspace matches', () => {
+    expect(normalizeLinearWorkspace('UnknownWorkspace', workspaces)).toBe('UnknownWorkspace');
+    expect(normalizeLinearWorkspace('other', workspaces)).toBe('other');
+  });
+
+  it('returns the input unchanged when the workspaces map is null or empty', () => {
+    expect(normalizeLinearWorkspace('Acme', null)).toBe('Acme');
+    expect(normalizeLinearWorkspace('Acme', {})).toBe('Acme');
+  });
+
+  it('handles undefined and null labels gracefully', () => {
+    expect(normalizeLinearWorkspace(undefined, workspaces)).toBe(undefined);
+    expect(normalizeLinearWorkspace(null, workspaces)).toBe(null);
   });
 });

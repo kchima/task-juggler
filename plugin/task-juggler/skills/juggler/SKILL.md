@@ -10,102 +10,134 @@ Manages the user's Task Juggler artifact: a persistent Cowork artifact
 across Slack, Linear, and AI sessions, and surfaces the single best next thing to
 do. See `src/` in the repo for the full data model and refresh pipeline.
 
-## Probe before you build (first run only)
+## Discover, validate, and build (first run or repair)
 
-Before creating or repairing the artifact, call each MCP tool you intend to wire
-in once, in chat, and record its exact name and response shape — do not assume
-names or shapes from documentation, since this environment's tool names carry
-instance-specific prefixes (e.g. `mcp__<uuid>__slack_read_thread`):
+Before creating or repairing the artifact, probe every accessible connector to
+determine what is available and build a single configuration payload + tool
+allowlist. Do this systematically — the order matters because results from one
+source determine which tool names must appear in the artifact's allowlist.
 
-- Every connected Slack connector: note the server prefix for its
-  `slack_read_thread` and search tools. **Both return a JSON envelope, not a bare
-  text blob** — `slack_read_thread` gives `{messages, pagination_info}` and search
-  gives `{results, pagination_info}`, where the thread/search body is the string
-  inside `.messages` / `.results`. This is live-verified and worth being exact
-  about: an earlier version of this doc claimed the thread arrived as raw text in
-  `content[0].text`, and code written against that assumption treated *every real
-  thread* as unfetchable, while a bare-string test fixture passed happily. Treat
-  the extracted `.messages` string as the canonical context; don't parse fields
-  out of it beyond that.
-- Every connected Linear connector (there may be more than one — Linear OAuth is
-  workspace-scoped, so each workspace is a separate connector instance): call
-  `list_teams` on each to get its workspace/team name, and note its server
-  prefix. Build a `{ workspaceLabel -> serverPrefix }` map keyed by that name.
-  `get_issue`/`list_issues` return structured JSON via `structuredContent`.
-- Matching is case-insensitive by design (`mcpAdapters.js`'s `findWorkspacePrefix`)
-  because a pasted Linear URL's workspace slug (e.g. `acme`) and the team name
-  from `list_teams` (e.g. `Acme`) won't always share casing — you don't need to
-  normalize this yourself, just pass the label through as captured.
-- **Claude Desktop / Cowork sessions — do this from CHAT, not the artifact.**
-  Which server exists depends on the host, and they are NOT interchangeable.
-  Claude Code exposes `ccd_session_mgmt`, whose `list_sessions` returns a real
-  array of `{ sessionId, title, cwd, isArchived, isRunning, lastActivityAt }`
-  (verified live) with `list_events` for the transcript tail. Cowork exposes
-  `session_info` instead — schema confirmed live from its own tool
-  definition, one optional param: `{ limit: number }` (default 20, most
-  recent first). Its response is **prose**, not JSON:
-  ```
-  Sessions (N of TOTAL, most recent first...)
-    - <sessionId> "<title>" (<status>, cwd: <path>, is_child: <bool>)
-    ...
-  ```
-  No `isArchived`/`lastActivityAt` anywhere — there is no timestamp field at
-  all, so staleness has to come from "most recent first" ordering plus a
-  count cutoff, not a date comparison. `read_transcript` is presumably the
-  tail-reading counterpart, but its shape is NOT verified — probe it the same
-  way before writing anything against it.
+### Step 1 — Discover Slack connectors
 
-  **Settled finding, confirmed twice: `session_info__list_sessions` works
-  fine from chat and fails from inside the artifact, with the exact same
-  arguments.** Called from chat with `{ limit: 3 }` (and with `{}`, and with
-  `{ limit: "3" }`), it returns real session data every time. Called from
-  inside a deployed artifact via `callMcpTool` with those identical
-  arguments, it returned `Tool call failed: 400` every time — a bare,
-  contentless refusal, not the labeled
-  `"...not in this artifact's mcp_tools allowlist"` message a genuine
-  allowlist rejection gives (`ccd_session_mgmt`, tried from the same artifact,
-  gave that exact labeled message instead, since it isn't declared in
-  `mcp_tools` at all). Since every other source (Slack, Linear, Todoist)
-  calls tools from inside this same artifact successfully, this isn't a
-  general sandbox limitation — it looks like a deliberate, tool-specific
-  restriction on enumerating a user's full cross-session list from a
-  less-trusted artifact context, which makes sense: that's a much broader
-  disclosure surface (every session title and working directory on the
-  user's machine) than one Slack workspace or Linear project.
+For each connected Slack connector visible in this environment:
 
-  This is a closed question, not an open one — don't spend time re-probing it
-  or trying to route around it from the artifact side. **Claude session
-  discovery only ever runs in chat**, via the deep-scan flow below, injecting
-  results as seed tasks the same way add-by-link already does. There used to
-  be artifact-side code and a Probe button for this; both were removed once
-  the platform restriction was confirmed stable rather than left as dead
-  weight pointed at a permanent dead end. If a future host or config change
-  ever lets an artifact call `session_info` successfully, that would be worth
-  re-adding — but don't assume it without a fresh probe first.
+1. Identify the connector's server prefix (e.g. `mcp__<uuid>__` is part of every
+   tool name it exposes).
+2. Call `slack_read_thread` with a known channel/thread to verify the tool
+   exists and observe its response shape. **The response is a JSON envelope,
+   not a bare text blob** — it returns `{messages, pagination_info}` where the
+   thread body is the string inside `.messages`. Call a search tool to confirm
+   it returns `{results, pagination_info}` with results inside `.results`.
+   (This is live-verified: an earlier version of this doc assumed bare text,
+   and code written against that treated *every real thread* as unfetchable.)
+3. Record the full tool name for `slack_read_thread` and the full tool name
+   for `slack_search_public_and_private` (or whatever search tool is exposed).
+
+If no Slack connector is available, note that Slack tasks will not be
+auto-discovered. Existing Slack tasks still refresh via their stored
+thread references.
+
+### Step 2 — Discover Linear workspaces
+
+For each connected Linear connector (there may be more than one — Linear OAuth
+is workspace-scoped, so each workspace is a separate connector instance):
+
+1. Identify the connector's server prefix.
+2. Call `list_teams` on it to get the workspace/team name.
+3. Record the team name (user-visible label, e.g. `Acme`) and the server
+   prefix. Matching against a pasted URL slug is case-insensitive by design
+   — `mcpAdapters.js`'s `findWorkspacePrefix` handles casing differences
+   between a URL slug (`acme`) and a team name (`Acme`).
+4. Also call `list_issues` with `{ assignee: "me" }` and verify it returns
+   structured JSON via `structuredContent` with an `issues` array. If it
+   throws (connector invalidated / needs reconnect), skip that workspace —
+   its existing tasks will show stale on next refresh rather than failing
+   everything.
+
+If no Linear connector is available, note that Linear tasks will not be
+auto-discovered.
+
+### Step 3 — Discover Todoist
+
+If a Todoist connector (`find-tasks` tool) is available:
+
+1. Call `find-tasks` with `{ filter: "today | overdue | p1", limit: 50 }`.
+2. Verify the result returns structured JSON with a `tasks` array containing
+   objects that have at least `id` and `content` string fields.
+3. If the shape is valid, record the full tool name. If it throws or returns
+   an unexpected shape, skip Todoist — it will not be auto-discovered.
+
+If no Todoist connector is available, note that existing Todoist tasks are
+not refreshable (Todoist is in `NO_REFRESH_ADAPTER_SOURCES`).
+
+### Step 4 — Claude/Cowork sessions (chat only, not artifact)
+
+Do not add session tool names to the artifact configuration. This is a
+**settled finding confirmed twice**: `session_info.list_sessions` works from
+chat but fails from inside the artifact with `Tool call failed: 400` — a
+deliberate platform restriction on enumerating sessions from a less-trusted
+artifact context. Use the deep-scan chat flow below (see "Deep-scan chat
+flow") for session discovery.
+
+If `ccd_session_mgmt` (Claude Code) is present but `session_info` (Cowork)
+is the host's tool, note which — the deep-scan flow handles both shapes
+differently.
+
+### Step 5 — Build the configuration payload
+
+Collect the recorded values and build the config JSON and tool allowlist
+together:
+
+```js
+// Pseudocode — substitute the actual discovered names
+const probeResults = {
+  slack: readThreadTool && searchTool
+    ? { readThread: readThreadTool, search: searchTool }
+    : null,
+  linearWorkspaces: [
+    // One entry per workspace that responded successfully
+    { label: "Acme", prefix: "mcp__<uuid>__" },
+  ],
+  todoist: todoistTool ? { findTasks: todoistTool } : null,
+};
+
+// These are exported from src/connectorConfig.js but the logic is simple
+// enough to do by hand if you can't import:
+//   config object = { slackReadThread, slackSearch, linearWorkspaces, todoistFindTasks }
+//   allowlist     = all tool-level names (Slack read/search, Linear prefix+tool, Todoist)
+const configJson = buildToolConfig(probeResults);
+const mcpToolsAllowlist = configToMcpTools(configJson);
+```
+
+The resulting config JSON goes into `#juggler-tool-config`. The allowlist
+goes into the `mcp_tools` parameter of `create_artifact` / `update_artifact`.
+Because both are derived from the same probe results, they cannot drift.
+
+If a connector was unavailable or threw, simply omit it from `probeResults` —
+`buildToolConfig` will write empty defaults and `configToMcpTools` will not
+generate any allowlist entries for it, so the artifact degrades gracefully.
 
 ## Create or repair the artifact
 
 1. Build the artifact if `dist/task-juggler.html` is stale relative to `src/`:
    `cd task-juggler && npm run build`.
-2. Inject a small `<script>` before the main module script, setting the tool
-   names discovered in the probe step:
-   ```js
-   window.__JUGGLER_TOOL_NAMES__ = {
-     slackReadThread: "mcp__...__slack_read_thread",
-     slackSearch:     "mcp__...__slack_search_public_and_private",
-     todoistFindTasks:"mcp__...__find-tasks",
-     linearWorkspaces: { "Acme": "mcp__...__", "Globex": "mcp__...__" },
-   };
+2. Inject the config JSON (from Step 5 above) into the canonical tool-config
+   block:
+   ```html
+   <script id="juggler-tool-config" type="application/json">{"slackReadThread":"mcp__...__slack_read_thread","slackSearch":"mcp__...__slack_search","linearWorkspaces":{"Acme":"mcp__...__"},"todoistFindTasks":"mcp__...__find-tasks"}</script>
    ```
    No session-related names here — the artifact never calls a session tool
-   at all (see above). Any other name left empty just disables that source —
-   the artifact degrades gracefully rather than erroring, so a missing
-   connector is survivable.
+   at all (see Step 4 above). Any field left empty (or absent from the config)
+   just disables that source — the artifact degrades gracefully rather than
+   erroring, so a missing connector is survivable.
 3. Call `mcp__cowork__create_artifact` (first run) or `update_artifact` (repair)
-   with this HTML and the `mcp_tools` list containing every probed tool name
-   (Slack, Linear, Todoist only).
+   with this HTML and an `mcp_tools` list set to the allowlist from Step 5.
+   Because the allowlist is derived from the same probe results as the config
+   JSON, configuration and permissions cannot drift.
 4. Confirm to the user that the artifact was created/updated and that its state
-   (via `localStorage`) persists across sessions.
+   (via `localStorage`) persists across sessions. Tell them which connectors
+   were detected, which were skipped, and (for Linear) how many workspaces are
+   configured.
 
 ## Add-by-link chat flow
 
@@ -117,8 +149,15 @@ Slack/Linear/Devin URL and asks it to be tracked:
      → `{ source: "slack", sourceRef: { channelId, threadTs } }` (reconstruct
      `threadTs` by inserting a decimal point 6 digits from the end of the `p`
      digits — e.g. `p1784829904373009` → `1784829904.373009`).
-   - Linear issue URL (`https://linear.app/<workspace-slug>/issue/<ID>`) →
-     `{ source: "linear", sourceRef: { workspaceLabel: slug, issueId: ID } }`.
+- Linear issue URL (`https://linear.app/<workspace-slug>/issue/<ID>`) →
+      `{ source: "linear", sourceRef: { workspaceLabel: slug, issueId: ID } }`.
+      **Normalize the slug against the configured workspace labels before storing**
+      (match case-insensitively; use the canonical label from the config).
+      Without this, a pasted URL with lowercase `acme` and a discovered task with
+      uppercase `Acme` produce different identity keys, causing duplicate tasks
+      and ineffective dismissals. The artifact's `addByLink` does this
+      normalization automatically; when building seed tasks by hand, do it
+      yourself.
    - Anything else → `{ source: "url", sourceRef: { url } }`.
 2. Build a full seed task object matching the data model in the design spec
    (id, title, status: "not_started", the fields above, and sensible defaults
@@ -184,7 +223,7 @@ tasks. It does this without any skill involvement — the artifact cannot
 invoke a skill, so it was built not to need one for those three sources.
 
 Claude sessions are the one source this does NOT cover — deliberately, not
-by oversight (see "Probe before you build" above). The artifact has no
+by oversight (see Step 4 of "Discover, validate, and build" above). The artifact has no
 session-discovery code and no session-related UI at all; that entire
 source only exists via the deep-scan chat flow below.
 

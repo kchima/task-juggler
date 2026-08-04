@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mountApp } from '../src/main.js';
+import { mountApp, readToolConfig, validateToolConfig } from '../src/main.js';
 
 function domFixture() {
   document.body.innerHTML = `
@@ -9,6 +9,7 @@ function domFixture() {
       <details data-group="slack"><summary></summary><ul></ul></details>
       <details data-group="claude"><summary></summary><ul></ul></details>
       <details data-group="linear"><summary></summary><ul></ul></details>
+      <details data-group="todoist"><summary></summary><ul></ul></details>
     </details>
     <input id="jg-add-input" />
     <button id="jg-add-btn"></button>
@@ -177,7 +178,7 @@ describe('mountApp', () => {
       }),
       discoverNewTasks: vi.fn().mockResolvedValue({
         added: 1, errors: [],
-        detected: { linear: [] },
+        detected: { linear: [], todoist: [] },
       }),
     });
     mountApp(document, app);
@@ -187,6 +188,7 @@ describe('mountApp', () => {
 
     const candidatesEl = document.getElementById('jg-candidates');
     expect(candidatesEl.hidden).toBe(false);
+    // 2 Slack + 1 Claude (always shown) + 0 Linear + 0 Todoist = 3
     expect(candidatesEl.querySelector(':scope > summary').textContent).toContain('3');
 
     const slackGroup = candidatesEl.querySelector('[data-group="slack"]');
@@ -207,6 +209,10 @@ describe('mountApp', () => {
     const linearGroup = candidatesEl.querySelector('[data-group="linear"]');
     expect(linearGroup.querySelector('summary').textContent).toContain('Linear (0)');
     expect(linearGroup.querySelector('li').textContent).toBe('none this scan');
+
+    const todoistGroup = candidatesEl.querySelector('[data-group="todoist"]');
+    expect(todoistGroup.querySelector('summary').textContent).toContain('Todoist (0)');
+    expect(todoistGroup.querySelector('li').textContent).toBe('none this scan');
   });
 
   it('populates the lookback input from the stored override on mount', () => {
@@ -332,6 +338,26 @@ describe('mountApp', () => {
     expect(app.addManualTask).toHaveBeenCalledWith('Write the report');
   });
 
+  it('in AI-unavailable mode, refresh still calls discoverNewTasks and runSlackTriage', async () => {
+    const app = fakeApp({
+      refreshAll: vi.fn().mockResolvedValue({ skipped: false, results: [] }),
+      discoverNewTasks: vi.fn().mockResolvedValue({ added: 1 }),
+      runSlackTriage: vi.fn().mockResolvedValue({
+        skipped: false, scanned: 2, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false,
+      }),
+    });
+    mountApp(document, app, { aiUnavailable: true });
+    document.getElementById('jg-refresh-btn').click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(app.refreshAll).toHaveBeenCalled();
+    expect(app.discoverNewTasks).toHaveBeenCalled();
+    expect(app.runSlackTriage).toHaveBeenCalled();
+    const status = document.getElementById('jg-status').textContent;
+    expect(status).toContain('AI unavailable');
+  });
+
   it('a failing connector surfaces an error in the status line instead of taking the list down', async () => {
     const app = fakeApp({ refreshAll: vi.fn().mockRejectedValue(new Error('connector exploded')) });
     mountApp(document, app);
@@ -399,5 +425,99 @@ describe('mountApp', () => {
     mountApp(document, app);
     document.querySelector('.jg-chip').click();
     expect(app.cycleStatusManual).toHaveBeenCalledWith('1', expect.any(Function));
+  });
+});
+
+describe('tool config resolution', () => {
+  describe('readToolConfig', () => {
+    it('returns null when the config element is absent', () => {
+      const doc = { getElementById: () => null };
+      expect(readToolConfig(doc)).toBeNull();
+    });
+
+    it('returns null when the config element exists but has no content', () => {
+      const configEl = { textContent: '' };
+      const doc = { getElementById: (id) => (id === 'juggler-tool-config' ? configEl : null) };
+      expect(readToolConfig(doc)).toBeNull();
+    });
+
+    it('returns null for whitespace-only content', () => {
+      const configEl = { textContent: '   \n  ' };
+      const doc = { getElementById: (id) => (id === 'juggler-tool-config' ? configEl : null) };
+      expect(readToolConfig(doc)).toBeNull();
+    });
+
+    it('returns null for invalid JSON', () => {
+      const configEl = { textContent: '{invalid}' };
+      const doc = { getElementById: (id) => (id === 'juggler-tool-config' ? configEl : null) };
+      expect(readToolConfig(doc)).toBeNull();
+    });
+
+    it('returns null when JSON is a non-object (array)', () => {
+      const configEl = { textContent: '["a", "b"]' };
+      const doc = { getElementById: (id) => (id === 'juggler-tool-config' ? configEl : null) };
+      expect(readToolConfig(doc)).toBeNull();
+    });
+
+    it('returns the parsed object for valid JSON', () => {
+      const configEl = { textContent: '{"slackReadThread":"mcp__x__read"}' };
+      const doc = { getElementById: (id) => (id === 'juggler-tool-config' ? configEl : null) };
+      expect(readToolConfig(doc)).toEqual({ slackReadThread: 'mcp__x__read' });
+    });
+  });
+
+  describe('validateToolConfig', () => {
+    it('returns complete defaults when passed incomplete valid config', () => {
+      const result = validateToolConfig({ slackReadThread: 'mcp__x__read' });
+      expect(result).toEqual({
+        slackReadThread: 'mcp__x__read',
+        slackSearch: '',
+        linearWorkspaces: {},
+        todoistFindTasks: '',
+      });
+    });
+
+    it('returns complete defaults for null/undefined input', () => {
+      expect(validateToolConfig(null)).toBeNull();
+      expect(validateToolConfig(undefined)).toBeNull();
+    });
+
+    it('returns complete defaults when config string fields have wrong types', () => {
+      const result = validateToolConfig({ slackReadThread: 42, slackSearch: true });
+      expect(result.slackReadThread).toBe('');
+      expect(result.slackSearch).toBe('');
+    });
+
+    it('filters out non-string linear workspace labels and prefixes', () => {
+      const result = validateToolConfig({
+        linearWorkspaces: { Acme: 'mcp__acme__', BadLabel: null, GoodLabel: 'mcp__good__' },
+      });
+      expect(result.linearWorkspaces).toEqual({ Acme: 'mcp__acme__', GoodLabel: 'mcp__good__' });
+    });
+
+    it('returns linearWorkspaces as empty object when input is an array instead of object', () => {
+      const result = validateToolConfig({ linearWorkspaces: [] });
+      expect(result.linearWorkspaces).toEqual({});
+    });
+
+    it('handles a fully valid complete config', () => {
+      const result = validateToolConfig({
+        slackReadThread: 'mcp__x__read',
+        slackSearch: 'mcp__x__search',
+        todoistFindTasks: 'mcp__x__todoist',
+        linearWorkspaces: { Acme: 'mcp__acme__' },
+      });
+      expect(result).toEqual({
+        slackReadThread: 'mcp__x__read',
+        slackSearch: 'mcp__x__search',
+        todoistFindTasks: 'mcp__x__todoist',
+        linearWorkspaces: { Acme: 'mcp__acme__' },
+      });
+    });
+
+    it('ignores unrecognised fields', () => {
+      const result = validateToolConfig({ slackReadThread: 't', unknownField: 'should be ignored' });
+      expect(result.unknownField).toBeUndefined();
+    });
   });
 });

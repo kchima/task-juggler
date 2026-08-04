@@ -16,7 +16,7 @@ Depth-first, finishing-biased — not a breadth-first to-do list.
 
 ```bash
 npm install
-npm test          # run the full Vitest suite (98 tests)
+npm test          # run the full Vitest suite (219 tests)
 npm run build      # rebuild dist/task-juggler.html from src/
 ```
 

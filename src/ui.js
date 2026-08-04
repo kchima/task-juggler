@@ -37,12 +37,13 @@ export function renderErrors(container, errors) {
 // the outside: every candidate the last scan looked at, and what happened
 // to it. Unlike renderErrors, this never hides — "found nothing this scan"
 // is itself something worth being able to confirm, not just failures.
-export function renderCandidates(container, { slack = [], claude = [], linear = [] } = {}) {
-  const total = slack.length + claude.length + linear.length;
+export function renderCandidates(container, { slack = [], claude = [], linear = [], todoist = [] } = {}) {
+  const total = slack.length + claude.length + linear.length + todoist.length;
   container.querySelector(':scope > summary').textContent = `Detected this scan (${total})`;
   renderCandidateGroup(container.querySelector('[data-group="slack"]'), 'Slack', slack);
   renderCandidateGroup(container.querySelector('[data-group="claude"]'), 'Claude', claude);
   renderCandidateGroup(container.querySelector('[data-group="linear"]'), 'Linear', linear);
+  renderCandidateGroup(container.querySelector('[data-group="todoist"]'), 'Todoist', todoist);
 }
 
 function renderCandidateGroup(groupEl, label, items) {

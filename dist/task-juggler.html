@@ -59,6 +59,7 @@
   <details data-group="slack"><summary>Slack (0)</summary><ul></ul></details>
   <details data-group="claude"><summary>Claude (0)</summary><ul></ul></details>
   <details data-group="linear"><summary>Linear (0)</summary><ul></ul></details>
+  <details data-group="todoist"><summary>Todoist (0)</summary><ul></ul></details>
 </details>
 <header>
   <h1>Task Juggler</h1>
@@ -75,6 +76,7 @@
 <div id="jg-list"></div>
 <div id="jg-card" hidden></div>
 <script id="juggler-seed" type="application/json"></script>
+<script id="juggler-tool-config" type="application/json"></script>
 <script type="module">
 // --- id.js ---
 function generateId() {
@@ -533,6 +535,118 @@ function setSlackLookbackDate(dateStr, storageImpl = globalThis.localStorage) {
 }
 
 
+// --- connectorConfig.js ---
+// Builds a validated tool-config object and its corresponding mcp_tools
+// allowlist from the results of a chat-side connector probe. This is the
+// producer side of the configuration seam: the skill calls these functions
+// to determine what to inject into #juggler-tool-config and which tool names
+// to declare in the artifact's mcp_tools allowlist.
+
+/**
+ * @typedef {Object} SlackProbe
+ * @property {string} readThread  — full tool name for slack_read_thread
+ * @property {string} search      — full tool name for slack_search
+ */
+
+/**
+ * @typedef {Object} LinearWorkspaceProbe
+ * @property {string} label  — user-visible workspace/team name
+ * @property {string} prefix — connector server prefix (tool names start with this)
+ */
+
+/**
+ * @typedef {Object} TodoistProbe
+ * @property {string} findTasks — full tool name for find-tasks
+ */
+
+/**
+ * @typedef {Object} ProbeResults
+ * @property {SlackProbe|null}       slack
+ * @property {LinearWorkspaceProbe[]} linearWorkspaces
+ * @property {TodoistProbe|null}     todoist
+ */
+
+/**
+ * Build a validated tool-config JSON object from connector probe results.
+ * Returns null when the probe produced no usable connectors at all.
+ * Missing or null sources default to empty strings/objects so the artifact
+ * degrades gracefully rather than receiving an undefined field.
+ *
+ * @param {ProbeResults} results
+ * @returns {object|null}
+ */
+function buildToolConfig(results) {
+  if (!results) return null;
+  if (!results.slack && !results.todoist && !results.linearWorkspaces?.length) return null;
+
+  const config = {
+    slackReadThread: '',
+    slackSearch: '',
+    linearWorkspaces: {},
+    todoistFindTasks: '',
+  };
+
+  if (results.slack) {
+    if (typeof results.slack.readThread === 'string' && results.slack.readThread) {
+      config.slackReadThread = results.slack.readThread;
+    }
+    if (typeof results.slack.search === 'string' && results.slack.search) {
+      config.slackSearch = results.slack.search;
+    }
+  }
+
+  if (Array.isArray(results.linearWorkspaces)) {
+    for (const ws of results.linearWorkspaces) {
+      if (ws && typeof ws.label === 'string' && ws.label && typeof ws.prefix === 'string' && ws.prefix) {
+        config.linearWorkspaces[ws.label] = ws.prefix;
+      }
+    }
+  }
+
+  if (results.todoist) {
+    if (typeof results.todoist.findTasks === 'string' && results.todoist.findTasks) {
+      config.todoistFindTasks = results.todoist.findTasks;
+    }
+  }
+
+  return config;
+}
+
+/**
+ * Derive a deduplicated mcp_tools allowlist from a validated tool-config object.
+ * Each Linear workspace contributes its list_issues and get_issue tool names
+ * (prefixed by the connector prefix). The list preserves insertion order and
+ * removes duplicates so the same tool name is never declared twice.
+ *
+ * @param {object} config — validated tool config (from buildToolConfig or validateToolConfig)
+ * @returns {string[]}
+ */
+function configToMcpTools(config) {
+  const tools = [];
+
+  function add(name) {
+    if (typeof name === 'string' && name && !tools.includes(name)) {
+      tools.push(name);
+    }
+  }
+
+  if (config?.slackReadThread) add(config.slackReadThread);
+  if (config?.slackSearch) add(config.slackSearch);
+
+  if (config?.linearWorkspaces && typeof config.linearWorkspaces === 'object' && !Array.isArray(config.linearWorkspaces)) {
+    for (const prefix of Object.values(config.linearWorkspaces)) {
+      if (typeof prefix === 'string' && prefix) {
+        add(`${prefix}list_issues`);
+        add(`${prefix}get_issue`);
+      }
+    }
+  }
+
+  if (config?.todoistFindTasks) add(config.todoistFindTasks);
+
+  return tools;
+}
+
 // --- aiClient.js ---
 function buildJugglerPrompt(task, canonicalContext) {
   return [
@@ -604,10 +718,19 @@ function slackThreadText(unwrapped) {
   return typeof messages === 'string' ? messages : null;
 }
 
+// Returns the canonical workspace label from the configured linearWorkspaces
+// map by matching case-insensitively against the input label. When no match
+// is found, returns the input label unchanged so that tasks with an unknown
+// workspace label still have a sensible identity key for display and dismissal.
+function normalizeLinearWorkspace(label, linearWorkspaces) {
+  const target = String(label ?? '').toLowerCase();
+  const match = Object.keys(linearWorkspaces ?? {}).find((k) => k.toLowerCase() === target);
+  return match ?? label;
+}
+
 function findWorkspacePrefix(linearWorkspaces, workspaceLabel) {
-  const target = workspaceLabel.toLowerCase();
-  const match = Object.entries(linearWorkspaces ?? {}).find(([label]) => label.toLowerCase() === target);
-  return match?.[1];
+  const canonical = normalizeLinearWorkspace(workspaceLabel, linearWorkspaces);
+  return (linearWorkspaces ?? {})[canonical] ?? null;
 }
 
 async function fetchRawContext(task, callMcpTool, toolNames) {
@@ -693,12 +816,13 @@ function renderErrors(container, errors) {
 // the outside: every candidate the last scan looked at, and what happened
 // to it. Unlike renderErrors, this never hides — "found nothing this scan"
 // is itself something worth being able to confirm, not just failures.
-function renderCandidates(container, { slack = [], claude = [], linear = [] } = {}) {
-  const total = slack.length + claude.length + linear.length;
+function renderCandidates(container, { slack = [], claude = [], linear = [], todoist = [] } = {}) {
+  const total = slack.length + claude.length + linear.length + todoist.length;
   container.querySelector(':scope > summary').textContent = `Detected this scan (${total})`;
   renderCandidateGroup(container.querySelector('[data-group="slack"]'), 'Slack', slack);
   renderCandidateGroup(container.querySelector('[data-group="claude"]'), 'Claude', claude);
   renderCandidateGroup(container.querySelector('[data-group="linear"]'), 'Linear', linear);
+  renderCandidateGroup(container.querySelector('[data-group="todoist"]'), 'Todoist', todoist);
 }
 
 function renderCandidateGroup(groupEl, label, items) {
@@ -1137,13 +1261,19 @@ function createApp({ storage, callMcpTool, askClaude, toolNames, now = () => new
   }
 
   async function discoverTodoistCandidates() {
-    if (!toolNames.todoistFindTasks) return { candidates: [], error: null };
+    if (!toolNames.todoistFindTasks) return { candidates: [], error: null, detected: [] };
     try {
       const result = await withTimeout(callMcpTool(toolNames.todoistFindTasks, { filter: 'today | overdue | p1', limit: 50 }), BRIDGE_CALL_TIMEOUT_MS, 'Todoist find-tasks');
       const items = unwrapMcpResult(result)?.tasks ?? [];
-      return { candidates: items.filter((t) => passesTodoistGate(t, now())).map(todoistCandidateToTask), error: null };
+      const candidates = items.filter((t) => passesTodoistGate(t, now())).map(todoistCandidateToTask);
+      const detected = items.map((t) => ({
+        key: `todoist:${t.id}`,
+        label: t.content,
+        outcome: passesTodoistGate(t, now()) ? 'added' : 'skipped-gate',
+      }));
+      return { candidates, error: null, detected };
     } catch (err) {
-      return { candidates: [], error: `Todoist: ${err?.message ?? 'connector error'}` };
+      return { candidates: [], error: `Todoist: ${err?.message ?? 'connector error'}`, detected: [] };
     }
   }
 
@@ -1385,7 +1515,13 @@ function createApp({ storage, callMcpTool, askClaude, toolNames, now = () => new
     const linearDetected = linearResult.detected.map((d) => ({
       ...d, outcome: existingKeys.has(d.key) ? 'already-tracked' : 'added',
     }));
-    return { added: merged.length - existing.length, errors, detected: { linear: linearDetected } };
+    // Todoist detected outcomes are already resolved in
+    // discoverTodoistCandidates (added vs skipped-gate), but we mark
+    // candidates that were already tracked as already-tracked.
+    const todoistDetected = todoistResult.detected?.map((d) => ({
+      ...d, outcome: existingKeys.has(d.key) ? 'already-tracked' : d.outcome,
+    })) ?? [];
+    return { added: merged.length - existing.length, errors, detected: { linear: linearDetected, todoist: todoistDetected } };
   }
 
   function addManualTask(title) {
@@ -1394,6 +1530,16 @@ function createApp({ storage, callMcpTool, askClaude, toolNames, now = () => new
 
   function addByLink(url) {
     const parsed = parseLink(url);
+    // Normalize Linear workspace label against the configured workspaces so a
+    // pasted URL slug (e.g. "acme") matches the canonical label (e.g. "Acme")
+    // — without this the same issue creates duplicate tasks with different
+    // identity keys, and dismissal fails to cover both.
+    if (parsed.source === 'linear' && parsed.sourceRef?.workspaceLabel) {
+      parsed.sourceRef = {
+        ...parsed.sourceRef,
+        workspaceLabel: normalizeLinearWorkspace(parsed.sourceRef.workspaceLabel, toolNames.linearWorkspaces),
+      };
+    }
     return addTask(blankTask({
       title: url, source: parsed.source, sourceRef: parsed.sourceRef,
       ballInUsersCourt: false, now: now(),
@@ -1447,6 +1593,70 @@ const DEFAULT_TOOL_NAMES = {
   todoistFindTasks: '',
 };
 
+// Reads and validates connector configuration from the dedicated JSON block
+// in the artifact shell. Returns null when the block is absent, blank, or
+// contains invalid JSON, so callers fall back to window.__JUGGLER_TOOL_NAMES__
+// (existing injected artifacts) then DEFAULT_TOOL_NAMES.
+function readToolConfig(doc = globalThis.document) {
+  const el = doc?.getElementById('juggler-tool-config');
+  if (!el) return null;
+  const raw = el.textContent?.trim();
+  if (!raw) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  return parsed;
+}
+
+// Validates and normalises a tool-config object, discarding unrecognised
+// fields and substituting defaults for recognised fields with invalid types.
+// Returns a complete tool-names object matching DEFAULT_TOOL_NAMES shape.
+function validateToolConfig(config) {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return null;
+  const result = { ...DEFAULT_TOOL_NAMES };
+  if (typeof config.slackReadThread === 'string') result.slackReadThread = config.slackReadThread;
+  if (typeof config.slackSearch === 'string') result.slackSearch = config.slackSearch;
+  if (typeof config.todoistFindTasks === 'string') result.todoistFindTasks = config.todoistFindTasks;
+  if (config.linearWorkspaces && typeof config.linearWorkspaces === 'object' && !Array.isArray(config.linearWorkspaces)) {
+    const workspaces = {};
+    for (const [label, prefix] of Object.entries(config.linearWorkspaces)) {
+      if (typeof label === 'string' && typeof prefix === 'string') {
+        workspaces[label] = prefix;
+      }
+    }
+    result.linearWorkspaces = workspaces;
+  }
+  return result;
+}
+
+// Resolves the effective tool configuration from available sources in order:
+//   1. Valid config from the #juggler-tool-config JSON block (new artifacts)
+//   2. Legacy window.__JUGGLER_TOOL_NAMES__ global (existing artifacts)
+//   3. Static DEFAULT_TOOL_NAMES (all connectors disabled)
+// A blank or missing config block does not override the legacy global;
+// an explicit {} config block (valid but empty) intentionally disables all
+// sources even when a legacy global exists.
+function resolveToolConfig(doc) {
+  const config = readToolConfig(doc);
+  const legacy = typeof globalThis.__JUGGLER_TOOL_NAMES__ === 'object'
+    && globalThis.__JUGGLER_TOOL_NAMES__ !== null
+    ? globalThis.__JUGGLER_TOOL_NAMES__
+    : null;
+  if (config !== null) {
+    // Config block was present and parsed: use it (may be empty {} -> all disabled)
+    return validateToolConfig(config);
+  }
+  if (legacy !== null) {
+    // No config block; fall back to legacy global
+    return validateToolConfig(legacy);
+  }
+  return { ...DEFAULT_TOOL_NAMES };
+}
+
 // Claude session discovery doesn't run from inside the artifact at all — a
 // live probe confirmed session-listing tools are blocked at the
 // artifact-bridge layer even when correctly configured (see SKILL.md). This
@@ -1469,7 +1679,7 @@ function mountApp(doc, app, options = {}) {
   // up a real interval unintentionally — the real boot() below turns it on
   // with a sensible interval. Visibility-checked so it doesn't do work while
   // the artifact tab/panel isn't actually open.
-  const { autoRefreshMs = null, offline = false } = options;
+  const { autoRefreshMs = null, offline = false, aiUnavailable = false } = options;
   let viewMode = 'list';
   let cardQueue = [];
   let cardIndex = 0;
@@ -1530,6 +1740,11 @@ function mountApp(doc, app, options = {}) {
     }
     statusEl.textContent = `${statusPrefix}…`;
     try {
+      // In aiUnavailable mode (callMcpTool present but askClaude absent),
+      // Linear/Todoist discovery still works; only Slack AI classification
+      // is unavailable. The app's runSlackTriage will see askClaude throw
+      // and surface that as an error — and the UI reports it as such rather
+      // than hiding behind this catch or silently disabling Slack.
       const [refreshResult, discoverResult, slackResult] = await Promise.all([
         app.refreshAll(), app.discoverNewTasks(), app.runSlackTriage(),
       ]);
@@ -1538,9 +1753,10 @@ function mountApp(doc, app, options = {}) {
       const slackNote = slackResult.scanned
         ? `, Slack: ${slackResult.scanned} scanned/${slackResult.ongoing} ongoing/${slackResult.updated} updated/${slackResult.skippedResolved} resolved`
         : '';
+      const aiNote = aiUnavailable ? ' [AI unavailable — Slack refresh limited]' : '';
       statusEl.textContent = refreshResult.skipped
         ? 'Just refreshed'
-        : `${statusPrefix}ed (${aiCalls} AI call${aiCalls === 1 ? '' : 's'}${addedNote}${slackNote})`;
+        : `${statusPrefix}ed (${aiCalls} AI call${aiCalls === 1 ? '' : 's'}${addedNote}${slackNote})${aiNote}`;
       renderErrors(doc.getElementById('jg-errors'), [
         ...(refreshResult.errors ?? []),
         ...(discoverResult.errors ?? []),
@@ -1550,6 +1766,7 @@ function mountApp(doc, app, options = {}) {
         slack: slackResult.detected ?? [],
         claude: CLAUDE_SESSIONS_INFO,
         linear: discoverResult.detected?.linear ?? [],
+        todoist: discoverResult.detected?.todoist ?? [],
       });
     } catch (err) {
       // A failing connector must never take the list down with it — this
@@ -1622,14 +1839,21 @@ function mountApp(doc, app, options = {}) {
 // should instead run as a perfectly good local task list: manual add, edit,
 // status, dismissal and persistence all work without any bridge — only
 // discovery and refresh need one.
+// callMcpTool and askClaude are evaluated independently: MCP-only environments
+// (callMcpTool present, askClaude absent) can still run Linear and Todoist
+// discovery; only Slack AI classification requires askClaude.
 function resolveBridge(win) {
-  if (win.cowork?.callMcpTool && win.cowork?.askClaude) {
-    return { callMcpTool: win.cowork.callMcpTool, askClaude: win.cowork.askClaude, connected: true };
-  }
+  const hasMcp = Boolean(win.cowork?.callMcpTool);
+  const hasAi = Boolean(win.cowork?.askClaude);
   const unavailable = async () => {
     throw new Error('No MCP bridge available in this environment');
   };
-  return { callMcpTool: unavailable, askClaude: unavailable, connected: false };
+  return {
+    callMcpTool: hasMcp ? win.cowork.callMcpTool : unavailable,
+    askClaude: hasAi ? win.cowork.askClaude : unavailable,
+    mcpAvailable: hasMcp,
+    aiAvailable: hasAi,
+  };
 }
 
 function boot() {
@@ -1642,11 +1866,13 @@ function boot() {
     storage: window.localStorage,
     callMcpTool: bridge.callMcpTool,
     askClaude: bridge.askClaude,
-    toolNames: window.__JUGGLER_TOOL_NAMES__ ?? DEFAULT_TOOL_NAMES,
+    toolNames: resolveToolConfig(document),
   });
+  const connected = bridge.mcpAvailable || bridge.aiAvailable;
   mountApp(document, app, {
-    autoRefreshMs: bridge.connected ? AUTO_REFRESH_MS : null,
-    offline: !bridge.connected,
+    autoRefreshMs: connected ? AUTO_REFRESH_MS : null,
+    offline: !bridge.mcpAvailable && !bridge.aiAvailable,
+    aiUnavailable: !bridge.aiAvailable && bridge.mcpAvailable,
   });
 }
 

@@ -61,6 +61,7 @@ describe('renderCandidates', () => {
         <details data-group="slack"><summary></summary><ul></ul></details>
         <details data-group="claude"><summary></summary><ul></ul></details>
         <details data-group="linear"><summary></summary><ul></ul></details>
+        <details data-group="todoist"><summary></summary><ul></ul></details>
       </details>
     `;
     return document.getElementById('jg-candidates');
@@ -76,7 +77,7 @@ describe('renderCandidates', () => {
   it('shows "none this scan" per empty group instead of an empty list', () => {
     const container = candidatesFixture();
     renderCandidates(container, {});
-    for (const group of ['slack', 'claude', 'linear']) {
+    for (const group of ['slack', 'claude', 'linear', 'todoist']) {
       const el = container.querySelector(`[data-group="${group}"]`);
       expect(el.querySelector('li').textContent).toBe('none this scan');
     }
@@ -91,6 +92,7 @@ describe('renderCandidates', () => {
       ],
       claude: [{ key: 'claude_session:s1', label: 'Payments webhook retry backoff', outcome: 'added' }],
       linear: [],
+      todoist: [],
     });
 
     expect(container.querySelector(':scope > summary').textContent).toContain('3');
@@ -131,6 +133,7 @@ describe('buildDebugSnapshot', () => {
         <details data-group="slack"><summary>Slack (1)</summary><ul><li>[added] Priya asked Dana to review pricing copy</li></ul></details>
         <details data-group="claude"><summary>Claude (0)</summary><ul><li class="jg-candidate-empty">none this scan</li></ul></details>
         <details data-group="linear"><summary>Linear (1)</summary><ul><li>[already-tracked] [Acme] Fix flaky checkout retry logic</li></ul></details>
+        <details data-group="todoist"><summary>Todoist (0)</summary><ul><li class="jg-candidate-empty">none this scan</li></ul></details>
       </details>
     `;
     return document;
@@ -163,6 +166,7 @@ describe('buildDebugSnapshot', () => {
         <details data-group="slack"><summary></summary><ul></ul></details>
         <details data-group="claude"><summary></summary><ul></ul></details>
         <details data-group="linear"><summary></summary><ul></ul></details>
+        <details data-group="todoist"><summary></summary><ul></ul></details>
       </details>
     `;
     const text = buildDebugSnapshot(document);

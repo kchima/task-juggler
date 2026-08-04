@@ -54,5 +54,5 @@ binding only exists in real ES module semantics, not in a flat concatenation. Th
 build script now throws a build-time error if it detects an aliased import, but if
 you ever replace `build/inline.mjs` with something else, keep that guard (or use a
 real bundler that understands aliases). This was found live, the hard way: it
-broke the delete button in a way that 98/98 unit tests didn't catch, because the
+broke the delete button in a way that 219/219 unit tests didn't catch, because the
 tests import `src/*.js` directly and never exercise the built `dist/` output.

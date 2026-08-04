@@ -276,6 +276,31 @@ describe('createApp.discoverNewTasks', () => {
     expect(app.getTasks()).toHaveLength(1);
   });
 
+  it('addByLink normalizes a lowercase Linear slug to the canonical config label, then discoverNewTasks deduplicates against it', async () => {
+    const callMcpTool = mockCallMcpTool({
+      linearIssues: [{ ...acmeIssue, statusType: 'triage' }],
+    });
+    const app = createApp({ storage, callMcpTool, askClaude: vi.fn(), toolNames: TOOL_NAMES });
+
+    // Paste a Linear URL with a lowercase slug — "acme" instead of the
+    // config's "Acme". Without normalisation this task key would be
+    // "linear:acme:ACME-3913", which differs from the discovery key
+    // "linear:Acme:ACME-3913" — producing a duplicate and an ineffective
+    // dismissal.
+    const url = 'https://linear.app/acme/issue/ACME-3913/invalid-upgrade-upsell-configs';
+    app.addByLink(url);
+    const pasted = app.getTasks()[0];
+    expect(pasted.sourceRef.workspaceLabel).toBe('Acme'); // canonical label
+    expect(pasted.sourceRef.issueId).toBe('ACME-3913');
+
+    // Now run discovery — the same issue from the API (with canonical label
+    // "Acme") should deduplicate against the pasted task.
+    const { added, errors } = await app.discoverNewTasks();
+    expect(added).toBe(0);
+    expect(errors).toEqual([]);
+    expect(app.getTasks()).toHaveLength(1);
+  });
+
   // Dismissal coverage, moved here from the now-deleted dismissal.test.js:
   // that file tested this exclusively via Claude session discovery, which no
   // longer runs from the artifact (see SKILL.md) — Linear is the vehicle now,

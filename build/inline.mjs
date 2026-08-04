@@ -8,7 +8,7 @@ const root = join(__dirname, '..');
 const MODULE_ORDER = [
   'id.js', 'hash.js', 'normalize.js', 'scoring.js', 'urlParser.js',
   'taskKey.js', 'sourceLinks.js', 'discovery.js',
-  'storage.js', 'aiClient.js', 'mcpAdapters.js', 'seedMerge.js', 'ui.js', 'app.js', 'main.js',
+  'storage.js', 'connectorConfig.js', 'aiClient.js', 'mcpAdapters.js', 'seedMerge.js', 'ui.js', 'app.js', 'main.js',
 ];
 
 function assertModuleOrderIsComplete() {

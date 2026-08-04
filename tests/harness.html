@@ -13,7 +13,6 @@
   } from './mock-fixtures.js';
 
   const state = { slackVersion: 1, breakLinearGlobex: false, breakSlackAskClaude: false, hangSlackSearch: false };
-  window.__JUGGLER_TOOL_NAMES__ = MOCK_TOOL_NAMES;
 
   window.__jugglerToolCalls = [];
   window.cowork = {
@@ -129,6 +128,11 @@
   document.head.appendChild(style);
   const bodyMatch = html.match(/<body>([\s\S]*)<\/body>/);
   document.body.innerHTML = bodyMatch[1];
+  // Populate the canonical config block (new in Step 2 of the Cowork-native plan)
+  // instead of the legacy __JUGGLER_TOOL_NAMES__ global, so the harness exercises
+  // the production config resolution path.
+  const configEl = document.getElementById('juggler-tool-config');
+  if (configEl) configEl.textContent = JSON.stringify(MOCK_TOOL_NAMES);
   const scriptMatch = html.match(/<script type="module">([\s\S]*?)<\/script>\s*<\/body>/);
   const script = document.createElement('script');
   script.type = 'module';

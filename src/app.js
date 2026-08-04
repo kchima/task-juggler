@@ -3,7 +3,7 @@ import {
   loadDismissedKeys, addDismissedKey, clearDismissedKeys, loadWatermarks, setWatermark,
   loadSlackLookbackDate, setSlackLookbackDate,
 } from './storage.js';
-import { fetchRawContext, unwrapMcpResult, slackThreadText } from './mcpAdapters.js';
+import { fetchRawContext, normalizeLinearWorkspace, unwrapMcpResult, slackThreadText } from './mcpAdapters.js';
 import { normalizeLinearIssue, normalizeSlackThread } from './normalize.js';
 import { djb2Hash } from './hash.js';
 import { refreshTaskViaAi } from './aiClient.js';
@@ -250,13 +250,19 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
   }
 
   async function discoverTodoistCandidates() {
-    if (!toolNames.todoistFindTasks) return { candidates: [], error: null };
+    if (!toolNames.todoistFindTasks) return { candidates: [], error: null, detected: [] };
     try {
       const result = await withTimeout(callMcpTool(toolNames.todoistFindTasks, { filter: 'today | overdue | p1', limit: 50 }), BRIDGE_CALL_TIMEOUT_MS, 'Todoist find-tasks');
       const items = unwrapMcpResult(result)?.tasks ?? [];
-      return { candidates: items.filter((t) => passesTodoistGate(t, now())).map(todoistCandidateToTask), error: null };
+      const candidates = items.filter((t) => passesTodoistGate(t, now())).map(todoistCandidateToTask);
+      const detected = items.map((t) => ({
+        key: `todoist:${t.id}`,
+        label: t.content,
+        outcome: passesTodoistGate(t, now()) ? 'added' : 'skipped-gate',
+      }));
+      return { candidates, error: null, detected };
     } catch (err) {
-      return { candidates: [], error: `Todoist: ${err?.message ?? 'connector error'}` };
+      return { candidates: [], error: `Todoist: ${err?.message ?? 'connector error'}`, detected: [] };
     }
   }
 
@@ -498,7 +504,13 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
     const linearDetected = linearResult.detected.map((d) => ({
       ...d, outcome: existingKeys.has(d.key) ? 'already-tracked' : 'added',
     }));
-    return { added: merged.length - existing.length, errors, detected: { linear: linearDetected } };
+    // Todoist detected outcomes are already resolved in
+    // discoverTodoistCandidates (added vs skipped-gate), but we mark
+    // candidates that were already tracked as already-tracked.
+    const todoistDetected = todoistResult.detected?.map((d) => ({
+      ...d, outcome: existingKeys.has(d.key) ? 'already-tracked' : d.outcome,
+    })) ?? [];
+    return { added: merged.length - existing.length, errors, detected: { linear: linearDetected, todoist: todoistDetected } };
   }
 
   function addManualTask(title) {
@@ -507,6 +519,16 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
 
   function addByLink(url) {
     const parsed = parseLink(url);
+    // Normalize Linear workspace label against the configured workspaces so a
+    // pasted URL slug (e.g. "acme") matches the canonical label (e.g. "Acme")
+    // — without this the same issue creates duplicate tasks with different
+    // identity keys, and dismissal fails to cover both.
+    if (parsed.source === 'linear' && parsed.sourceRef?.workspaceLabel) {
+      parsed.sourceRef = {
+        ...parsed.sourceRef,
+        workspaceLabel: normalizeLinearWorkspace(parsed.sourceRef.workspaceLabel, toolNames.linearWorkspaces),
+      };
+    }
     return addTask(blankTask({
       title: url, source: parsed.source, sourceRef: parsed.sourceRef,
       ballInUsersCourt: false, now: now(),

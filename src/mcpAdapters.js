@@ -24,10 +24,19 @@ export function slackThreadText(unwrapped) {
   return typeof messages === 'string' ? messages : null;
 }
 
+// Returns the canonical workspace label from the configured linearWorkspaces
+// map by matching case-insensitively against the input label. When no match
+// is found, returns the input label unchanged so that tasks with an unknown
+// workspace label still have a sensible identity key for display and dismissal.
+export function normalizeLinearWorkspace(label, linearWorkspaces) {
+  const target = String(label ?? '').toLowerCase();
+  const match = Object.keys(linearWorkspaces ?? {}).find((k) => k.toLowerCase() === target);
+  return match ?? label;
+}
+
 function findWorkspacePrefix(linearWorkspaces, workspaceLabel) {
-  const target = workspaceLabel.toLowerCase();
-  const match = Object.entries(linearWorkspaces ?? {}).find(([label]) => label.toLowerCase() === target);
-  return match?.[1];
+  const canonical = normalizeLinearWorkspace(workspaceLabel, linearWorkspaces);
+  return (linearWorkspaces ?? {})[canonical] ?? null;
 }
 
 export async function fetchRawContext(task, callMcpTool, toolNames) {
