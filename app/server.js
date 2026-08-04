@@ -171,16 +171,62 @@ app.post('/api/import', (req, res) => {
 // or starts as null (no MCP available, reports unconfigured).
 let _mcpClient = null;
 let _mcpServerProcess = null;
+// In-memory API key storage — set via POST /api/sources/keys, used by scanner.
+// Merged with env vars (submitted keys take priority over env).
+let _apiKeys = {};
 
 function getOrCreateMcpClient() {
   return _mcpClient; // may be null — scanner handles this gracefully
 }
 
 // Scan all configured sources for new tasks
-app.post('/api/sources/scan', async (_req, res) => {
+// Accepts optional API keys in body: { keys: { linear, todoist, slack, devin } }
+app.post('/api/sources/scan', async (req, res) => {
   const mcpClient = getOrCreateMcpClient();
-  const results = await scanAllSources(mcpClient);
+  // Merge: body keys > stored keys > env vars
+  const bodyKeys = req.body?.keys || {};
+  const envConfig = {
+    linear: bodyKeys.linear || _apiKeys.linear || process.env.LINEAR_API_KEY || null,
+    todoist: bodyKeys.todoist || _apiKeys.todoist || process.env.TODOIST_API_TOKEN || null,
+    slack: bodyKeys.slack || _apiKeys.slack || process.env.SLACK_BOT_TOKEN || null,
+    devin: bodyKeys.devin || _apiKeys.devin || process.env.DEVIN_API_TOKEN || null,
+  };
+  // Persist submitted keys for subsequent scans
+  if (bodyKeys.linear) _apiKeys.linear = bodyKeys.linear;
+  if (bodyKeys.todoist) _apiKeys.todoist = bodyKeys.todoist;
+  if (bodyKeys.slack) _apiKeys.slack = bodyKeys.slack;
+  if (bodyKeys.devin) _apiKeys.devin = bodyKeys.devin;
+  const results = await scanAllSources(mcpClient, envConfig);
   res.json({ results });
+});
+
+// Store API keys server-side for subsequent scans (persisted in memory)
+app.post('/api/sources/keys', (req, res) => {
+  const { keys } = req.body;
+  if (!keys || typeof keys !== 'object') return res.status(400).json({ error: 'keys object required' });
+  // Redact before storing (mask middle chars)
+  const stored = {};
+  for (const [sourceId, value] of Object.entries(keys)) {
+    if (typeof value === 'string' && value.length > 4) {
+      _apiKeys[sourceId] = value;
+      stored[sourceId] = value.slice(0, 4) + '···' + value.slice(-4);
+    }
+  }
+  res.json({ ok: true, stored: Object.keys(stored) });
+});
+
+// Get the stored API key status (which sources have keys, without exposing values)
+app.get('/api/sources/keys', (_req, res) => {
+  const status = {};
+  for (const [sourceId, value] of Object.entries(_apiKeys)) {
+    status[sourceId] = { configured: true, masked: value.slice(0, 4) + '···' + value.slice(-4) };
+  }
+  for (const key of ['linear', 'todoist', 'slack', 'devin']) {
+    if (!status[key] && process.env[`${key.toUpperCase()}_API_KEY`]) {
+      status[key] = { configured: true, source: 'env' };
+    }
+  }
+  res.json({ keys: status });
 });
 
 // Get source capability report

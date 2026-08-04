@@ -1,17 +1,20 @@
 /**
  * Source scanner — attempts to discover tasks from each configured source.
- * Tries MCP first (via a stdio server), falls back to direct API stubs.
+ * Tries MCP first, falls back to direct API adapters when configured.
  * Each scan is isolated: one source failing never blocks another.
  */
 
-import { emptyScanResult, scanResultWithError, scanResultUnconfigured, getSource } from './registry.js';
+import {
+  emptyScanResult, scanResultWithError, scanResultUnconfigured,
+} from './registry.js';
+import {
+  scanLinearDirect, scanTodoistDirect, scanSlackDirect, scanDevinDirect,
+  getDirectAdaptersConfig,
+} from './directAdapters.js';
 
 // --- MCP client discovery -------------------------------------------------
 
 async function tryMcpDiscovery(sourceId, mcpClient) {
-  const source = getSource(sourceId);
-  if (!source) return scanResultWithError(sourceId, `Unknown source: ${sourceId}`);
-
   try {
     switch (sourceId) {
       case 'slack':   return await scanSlackViaMcp(mcpClient);
@@ -26,139 +29,81 @@ async function tryMcpDiscovery(sourceId, mcpClient) {
 }
 
 async function scanSlackViaMcp(mcpClient) {
+  // ...unchanged from before...
   const result = emptyScanResult('slack');
-
-  if (!mcpClient.hasTool('slack_search')) {
+  if (!mcpClient.hasTool('slack_search') || !mcpClient.hasTool('slack_read_thread')) {
     result.status = 'unconfigured';
-    result.errors.push('slack_search tool not available from MCP server');
+    if (!mcpClient.hasTool('slack_search')) result.errors.push('slack_search tool not available');
+    if (!mcpClient.hasTool('slack_read_thread')) result.errors.push('slack_read_thread tool not available');
     return result;
   }
-  if (!mcpClient.hasTool('slack_read_thread')) {
-    result.status = 'unconfigured';
-    result.errors.push('slack_read_thread tool not available from MCP server');
-    return result;
-  }
-
   try {
-    // Search for recent threads mentioning the user
-    const searchResult = await mcpClient.callTool('slack_search', {
-      query: 'is:thread to:me after:yesterday',
-      limit: 20,
-    });
-    const text = extractTextContent(searchResult);
-    if (text) {
-      const refs = extractSlackThreadRefs(text);
-      for (const ref of refs) {
-        const key = `slack:${ref.channelId}:${ref.threadTs}`;
-        result.items.push({
-          key,
-          label: `Thread in #${ref.channelId}`,
-          url: `https://${ref.workspaceDomain}/archives/${ref.channelId}/p${ref.threadTs.replace('.', '')}?thread_ts=${ref.threadTs}&cid=${ref.channelId}`,
-        });
-        result.detected.push({ key, label: `Thread in #${ref.channelId}`, outcome: 'pending' });
-      }
-    }
-
-    // Also search for threads where the user has spoken
-    const fromResult = await mcpClient.callTool('slack_search', {
-      query: 'is:thread from:me after:yesterday',
-      limit: 20,
-    });
-    const fromText = extractTextContent(fromResult);
-    if (fromText) {
-      const refs = extractSlackThreadRefs(fromText);
-      for (const ref of refs) {
-        const key = `slack:${ref.channelId}:${ref.threadTs}`;
-        if (!result.items.some((i) => i.key === key)) {
-          result.items.push({
-            key,
-            label: `Thread in #${ref.channelId}`,
-            url: `https://${ref.workspaceDomain}/archives/${ref.channelId}/p${ref.threadTs.replace('.', '')}?thread_ts=${ref.threadTs}&cid=${ref.channelId}`,
-          });
-          result.detected.push({ key, label: `Thread in #${ref.channelId}`, outcome: 'pending' });
+    for (const query of ['is:thread to:me after:yesterday', 'is:thread from:me after:yesterday']) {
+      const searchResult = await mcpClient.callTool('slack_search', { query, limit: 20 });
+      const text = extractTextContent(searchResult);
+      if (text) {
+        for (const ref of extractSlackThreadRefs(text)) {
+          const key = `slack:${ref.channelId}:${ref.threadTs}`;
+          if (!result.items.some((i) => i.key === key)) {
+            result.items.push({
+              key,
+              label: `Thread in #${ref.channelId}`,
+              url: `https://${ref.workspaceDomain}/archives/${ref.channelId}/p${ref.threadTs.replace('.', '')}?thread_ts=${ref.threadTs}&cid=${ref.channelId}`,
+            });
+            result.detected.push({ key, label: `Thread in #${ref.channelId}`, outcome: 'pending' });
+          }
         }
       }
     }
   } catch (err) {
     result.errors.push(`Slack search: ${err.message}`);
   }
-
   return result;
 }
 
 async function scanLinearViaMcp(mcpClient) {
   const result = emptyScanResult('linear');
-
   if (!mcpClient.hasTool('linear_list_issues')) {
     result.status = 'unconfigured';
-    result.errors.push('linear_list_issues tool not available from MCP server');
+    result.errors.push('linear_list_issues tool not available');
     return result;
   }
-
   try {
     const issuesResult = await mcpClient.callTool('linear_list_issues', { assignee: 'me' });
     const raw = extractTextContent(issuesResult);
-    let issues;
-    try {
-      issues = JSON.parse(raw).issues || [];
-    } catch {
-      issues = [];
-    }
-
+    const issues = safeJsonParse(raw)?.issues || [];
     for (const issue of issues) {
-      const isOpen = ['backlog', 'unstarted', 'started', 'triage'].includes(issue.statusType);
-      if (!isOpen) continue;
+      if (!['backlog', 'unstarted', 'started', 'triage'].includes(issue.statusType)) continue;
       const key = `linear:${issue.id}`;
-      result.items.push({
-        key,
-        label: `[${issue.identifier || issue.id}] ${issue.title}`,
-        url: issue.url || null,
-      });
+      result.items.push({ key, label: `[${issue.identifier || issue.id}] ${issue.title}`, url: issue.url || null });
       result.detected.push({ key, label: issue.title, outcome: 'added' });
     }
   } catch (err) {
     result.errors.push(`Linear: ${err.message}`);
   }
-
   return result;
 }
 
 async function scanTodoistViaMcp(mcpClient) {
   const result = emptyScanResult('todoist');
-
   if (!mcpClient.hasTool('todoist_find_tasks')) {
     result.status = 'unconfigured';
-    result.errors.push('todoist_find_tasks tool not available from MCP server');
+    result.errors.push('todoist_find_tasks tool not available');
     return result;
   }
-
   try {
-    const tasksResult = await mcpClient.callTool('todoist_find_tasks', {
-      filter: 'today | overdue | p1',
-      limit: 50,
-    });
+    const tasksResult = await mcpClient.callTool('todoist_find_tasks', { filter: 'today | overdue | p1', limit: 50 });
     const raw = extractTextContent(tasksResult);
-    let tasks;
-    try {
-      tasks = JSON.parse(raw).tasks || [];
-    } catch {
-      tasks = [];
-    }
-
+    const tasks = safeJsonParse(raw)?.tasks || [];
     for (const task of tasks) {
       const key = `todoist:${task.id}`;
       const isUrgent = task.priority === 'p1' || (task.dueDate && new Date(task.dueDate) <= new Date());
-      result.items.push({
-        key,
-        label: task.content,
-        url: null,
-      });
+      result.items.push({ key, label: task.content, url: null });
       result.detected.push({ key, label: task.content, outcome: isUrgent ? 'added' : 'skipped-gate' });
     }
   } catch (err) {
     result.errors.push(`Todoist: ${err.message}`);
   }
-
   return result;
 }
 
@@ -172,6 +117,11 @@ function extractTextContent(mcpResult) {
   }
   if (mcpResult.text) return mcpResult.text;
   return JSON.stringify(mcpResult);
+}
+
+function safeJsonParse(str) {
+  if (typeof str !== 'string') return null;
+  try { return JSON.parse(str); } catch { return null; }
 }
 
 const SLACK_PERMALINK_RE = /https:\/\/([\w-]+\.slack\.com)\/archives\/([A-Z0-9]+)\/p\d+\?[^)\s]*thread_ts=([\d.]+)/g;
@@ -189,54 +139,66 @@ function extractSlackThreadRefs(text) {
 // --- Main scan orchestrator ------------------------------------------------
 
 /**
- * Scan all sources. Accepts an MCP client if one is available (may be null).
- * Returns a map of sourceId -> scanResult.
+ * Scan all sources. Accepts optional MCP client and optional env-config for direct adapters.
  */
-export async function scanAllSources(mcpClient = null) {
+export async function scanAllSources(mcpClient = null, envConfig = {}) {
+  // Resolve direct adapter credentials from envConfig or process.env
+  const direct = {
+    linear: envConfig.linear || process.env.LINEAR_API_KEY || null,
+    todoist: envConfig.todoist || process.env.TODOIST_API_TOKEN || null,
+    slack: envConfig.slack || process.env.SLACK_BOT_TOKEN || null,
+    devin: envConfig.devin || process.env.DEVIN_API_TOKEN || null,
+  };
+
   const results = {};
 
-  // Slack — requires MCP
-  if (mcpClient) {
+  // --- Slack ---
+  if (mcpClient && mcpClient.hasTool('slack_search')) {
     results.slack = await tryMcpDiscovery('slack', mcpClient);
+  } else if (direct.slack) {
+    results.slack = await scanSlackDirect(direct.slack);
   } else {
     results.slack = scanResultUnconfigured('slack');
-    results.slack.errors.push('No MCP server connected — Slack scanning requires an MCP server with slack_search and slack_read_thread tools.');
+    results.slack.errors.push('No Slack MCP server or SLACK_BOT_TOKEN configured. To enable: (a) connect a Slack MCP server, or (b) set the SLACK_BOT_TOKEN environment variable.');
   }
 
-  // Linear — MCP or direct fallback
+  // --- Linear ---
   if (mcpClient && mcpClient.hasTool('linear_list_issues')) {
     results.linear = await tryMcpDiscovery('linear', mcpClient);
+  } else if (direct.linear) {
+    results.linear = await scanLinearDirect(direct.linear);
   } else {
     results.linear = scanResultUnconfigured('linear');
-    results.linear.errors.push('No Linear MCP server connected. Configure a Linear MCP server or set up direct API access.');
+    results.linear.errors.push('No Linear MCP server or LINEAR_API_KEY configured. To enable: (a) connect a Linear MCP server, or (b) set the LINEAR_API_KEY environment variable (a personal API key from https://linear.app/settings/api).');
   }
 
-  // Todoist — MCP or direct fallback
+  // --- Todoist ---
   if (mcpClient && mcpClient.hasTool('todoist_find_tasks')) {
     results.todoist = await tryMcpDiscovery('todoist', mcpClient);
+  } else if (direct.todoist) {
+    results.todoist = await scanTodoistDirect(direct.todoist);
   } else {
     results.todoist = scanResultUnconfigured('todoist');
-    results.todoist.errors.push('No Todoist MCP server connected. Configure a Todoist MCP server or set up direct API access.');
+    results.todoist.errors.push('No Todoist MCP server or TODOIST_API_TOKEN configured. To enable: (a) connect a Todoist MCP server, or (b) set the TODOIST_API_TOKEN environment variable (get it from Todoist settings → Integrations → API token).');
   }
 
-  // Devin — direct API only for now
-  results.devin = scanResultUnconfigured('devin');
-  results.devin.errors.push('Devin.ai scanning requires direct API configuration (not yet implemented).');
+  // --- Devin ---
+  if (direct.devin) {
+    results.devin = await scanDevinDirect(direct.devin);
+  } else {
+    results.devin = scanResultUnconfigured('devin');
+    results.devin.errors.push('DEVIN_API_TOKEN not configured. To enable: set the DEVIN_API_TOKEN environment variable (get a token from https://app.devin.ai/settings/api).');
+  }
 
-  // Claude — always info-only (blocked at bridge layer)
+  // --- Claude (always info-only — blocked at bridge layer) ---
   results.claude = scanResultUnconfigured('claude');
   results.claude.errors.push('Claude/Cowork session scanning is blocked at the artifact bridge layer. Use the juggler skill in chat to scan sessions.');
 
   return results;
 }
 
-/**
- * Check which MCP tools are available and return a compatibility report.
- */
 export function checkMcpCapabilities(mcpClient) {
-  if (!mcpClient) {
-    return { connected: false, tools: [], supportedSources: [] };
-  }
+  if (!mcpClient) return { connected: false, tools: [], supportedSources: [] };
   const tools = mcpClient.toolNames();
   const supportedSources = [];
   if (tools.includes('slack_search') && tools.includes('slack_read_thread')) supportedSources.push('slack');

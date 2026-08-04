@@ -93,12 +93,27 @@ function partitionTasks() {
 
 // --- Source label / icon helpers ---
 const SOURCE_META = {
-  slack:  { icon: '💬', label: 'Slack' },
-  linear: { icon: '⬡', label: 'Linear' },
-  todoist:{ icon: '✓', label: 'Todoist' },
-  devin:  { icon: 'Δ', label: 'Devin' },
+  slack:  { icon: '💬', label: 'Slack', keyLabel: 'SLACK_BOT_TOKEN', keyHint: 'xoxb-...' },
+  linear: { icon: '⬡', label: 'Linear', keyLabel: 'LINEAR_API_KEY', keyHint: 'lin_api_...' },
+  todoist:{ icon: '✓', label: 'Todoist', keyLabel: 'TODOIST_API_TOKEN', keyHint: '...' },
+  devin:  { icon: 'Δ', label: 'Devin', keyLabel: 'DEVIN_API_TOKEN', keyHint: '...' },
   claude: { icon: '✦', label: 'Claude/Cowork' },
 };
+
+// Stored API keys (in-memory on frontend, sent with each scan)
+let _apiKeys = {};
+
+// Load any saved keys from the server on init
+async function loadApiKeys() {
+  try {
+    const data = await api('/sources/keys');
+    if (data.keys) {
+      for (const [sid, info] of Object.entries(data.keys)) {
+        if (info.configured) _apiKeys[sid] = true; // mark as configured (actual key is server-side)
+      }
+    }
+  } catch { /* server may be starting up */ }
+}
 
 // --- Render ---
 function render() {
@@ -152,7 +167,11 @@ function renderSourcesPanel() {
     const meta = SOURCE_META[sourceId] || { icon: '?', label: sourceId };
     const errors = result.errors || [];
     const items = result.items || [];
+    const hasKeys = !!_apiKeys[sourceId];
     const statusClass = errors.length > 0 ? 'error' : (result.status || 'ok');
+
+    // Only show configure option for sources that support direct API keys
+    const showConfig = meta.keyLabel && ['slack', 'linear', 'todoist', 'devin'].includes(sourceId);
 
     return `
       <div class="source-entry" data-source="${sourceId}">
@@ -160,8 +179,16 @@ function renderSourcesPanel() {
           <span>${meta.icon}</span>
           <span>${meta.label}</span>
           <span class="source-status ${statusClass}">${statusClass}</span>
+          ${hasKeys ? '<span class="source-status ok" style="margin-left:4px;">key set</span>' : ''}
+          ${showConfig ? `<button class="btn small source-config-btn" data-source="${sourceId}" style="margin-left:4px;">🔑</button>` : ''}
         </div>
         <div class="source-items">
+          ${showConfig ? `
+            <div class="source-key-config hidden" data-source="${sourceId}" id="key-config-${sourceId}">
+              <input type="password" class="source-key-input" data-source="${sourceId}" placeholder="${meta.keyLabel} (${meta.keyHint})" style="width:100%;padding:4px 8px;margin-bottom:4px;background:var(--bg);border:1px solid var(--border);border-radius:3px;color:var(--text);font-size:0.8rem;">
+              <button class="btn small source-key-save" data-source="${sourceId}" style="margin-bottom:6px;">Save Key</button>
+            </div>
+          ` : ''}
           ${items.length === 0 && errors.length === 0
             ? `<div class="source-empty">No items found.</div>`
             : items.map((item) => `
@@ -310,6 +337,29 @@ function setupEventListeners() {
 
   // Refresh button — scan all sources
   document.getElementById('refreshBtn').addEventListener('click', handleRefresh);
+
+  // API key configuration (delegated)
+  document.addEventListener('click', (e) => {
+    const configBtn = e.target.closest('.source-config-btn');
+    if (configBtn) {
+      const sid = configBtn.dataset.source;
+      const configEl = document.getElementById(`key-config-${sid}`);
+      if (configEl) configEl.classList.toggle('hidden');
+      return;
+    }
+    const saveBtn = e.target.closest('.source-key-save');
+    if (saveBtn) {
+      const sid = saveBtn.dataset.source;
+      const input = document.querySelector(`.source-key-input[data-source="${sid}"]`);
+      if (input && input.value.trim()) {
+        handleSaveApiKey(sid, input.value.trim());
+        input.value = '';
+        const configEl = document.getElementById(`key-config-${sid}`);
+        if (configEl) configEl.classList.add('hidden');
+      }
+      return;
+    }
+  });
 
   // Keyboard shortcuts
   document.addEventListener('keydown', (e) => {
@@ -479,6 +529,21 @@ async function handleCreateSubtask(parentId) {
   }
 }
 
+// --- API key management ---
+async function handleSaveApiKey(sourceId, key) {
+  try {
+    // First save to server (persists in memory)
+    const body = { keys: { [sourceId]: key } };
+    await api('/sources/keys', { method: 'POST', body: JSON.stringify(body) });
+    _apiKeys[sourceId] = key;
+    showToast(`${SOURCE_META[sourceId]?.label || sourceId} API key saved`, 'success');
+    // Immediately scan with the new key
+    await handleRefresh();
+  } catch (err) {
+    showToast(`Failed to save key: ${err.message}`, 'error');
+  }
+}
+
 // --- Refresh (scan sources) ---
 async function handleRefresh() {
   const refreshBtn = document.getElementById('refreshBtn');
@@ -495,7 +560,10 @@ async function handleRefresh() {
   if (sourcesHeader) sourcesHeader.classList.add('open');
 
   try {
-    const data = await api('/sources/scan', { method: 'POST' });
+    // Keys saved server-side are used automatically — no need to send them
+    // from the frontend. Only send keys if the user just entered them via
+    // handleSaveApiKey (that function calls handleRefresh with the new key).
+    const data = await api('/sources/scan', { method: 'POST', body: '{}' });
     state.sources = data;
     render();
     showToast('Scan complete', 'success');
@@ -594,6 +662,7 @@ function showToast(message, type = 'info') {
 // --- Init ---
 async function init() {
   try {
+    await loadApiKeys();
     await loadTasks();
   } catch (err) {
     document.getElementById('activeList').innerHTML =
