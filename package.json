@@ -5,11 +5,20 @@
   "scripts": {
     "test": "vitest run",
     "build": "node build/inline.mjs",
+    "start": "node app/server.js",
+    "dev": "node --watch app/server.js",
     "harness": "http-server . -p 8123 -c-1"
   },
   "devDependencies": {
     "http-server": "^14.1.1",
     "jsdom": "^25.0.1",
+    "supertest": "^7.2.2",
     "vitest": "^2.1.9"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.2",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "uuid": "^14.0.1"
   }
 }

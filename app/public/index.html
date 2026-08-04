@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Task Juggler</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Task Juggler</h1>
+    <div class="header-actions">
+      <button id="newTaskBtn" class="btn primary">+ New Task</button>
+      <button id="importBtn" class="btn secondary">Import Legacy</button>
+      <span id="taskCount" class="count-badge"></span>
+    </div>
+  </header>
+
+  <div id="batchToolbar" class="batch-toolbar hidden">
+    <span id="selectedCount">0 selected</span>
+    <button id="batchCompleteBtn" class="btn small">Complete</button>
+    <button id="batchSetActiveBtn" class="btn small">Set Active</button>
+    <button id="batchNotStartedBtn" class="btn small">Not Started</button>
+    <button id="batchDeleteBtn" class="btn small danger">Delete</button>
+    <button id="batchClearBtn" class="btn small">Clear</button>
+  </div>
+
+  <main>
+    <!-- Active tasks section (in_progress + ballInUsersCourt) -->
+    <section id="activeSection">
+      <h2 class="section-title">Active</h2>
+      <div id="activeList" class="task-list"></div>
+    </section>
+
+    <!-- Not started section (collapsed by default) -->
+    <section id="notStartedSection">
+      <h2 class="section-title collapsible" data-target="notStartedList">
+        <span class="collapse-toggle">▶</span> Not Started
+        <span id="notStartedCount" class="count-pill"></span>
+      </h2>
+      <div id="notStartedList" class="task-list collapsed"></div>
+    </section>
+
+    <!-- Completed section (collapsed) -->
+    <section id="completedSection">
+      <h2 class="section-title collapsible" data-target="completedList">
+        <span class="collapse-toggle">▶</span> Completed
+        <span id="completedCount" class="count-pill"></span>
+      </h2>
+      <div id="completedList" class="task-list collapsed"></div>
+    </section>
+  </main>
+</div>
+
+<!-- New Task Modal -->
+<div id="newTaskModal" class="modal hidden">
+  <div class="modal-backdrop"></div>
+  <div class="modal-content">
+    <h2>New Task</h2>
+    <form id="newTaskForm">
+      <div class="form-group">
+        <label for="taskTitle">Title</label>
+        <input type="text" id="taskTitle" required autofocus>
+      </div>
+      <div class="form-group">
+        <label for="taskDescription">Description</label>
+        <textarea id="taskDescription" rows="2"></textarea>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label for="taskPriority">Priority</label>
+          <select id="taskPriority">
+            <option value="low">Low</option>
+            <option value="medium" selected>Medium</option>
+            <option value="high">High</option>
+            <option value="urgent">Urgent</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="taskParent">Parent Task</label>
+          <select id="taskParent"><option value="">None (root)</option></select>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn primary">Create</button>
+        <button type="button" id="cancelNewTask" class="btn secondary">Cancel</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

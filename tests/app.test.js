@@ -628,6 +628,49 @@ describe('createApp.runSlackTriage', () => {
     expect(second.updated).toBe(1);
   });
 
+  // Regression: reported production issue where 7 Slack threads were found
+  // but all marked unparsed. This simulates 7 distinct threads in one batch
+  // with a model that correctly returns all 7 verdicts.
+  it('correctly classifies 7 threads in one batch without marking any unparsed', async () => {
+    const sevenThreadSearchParts = [];
+    const verdicts = [];
+    for (let i = 0; i < 7; i++) {
+      const channelId = `C0${7 + i}EXAMPLE`;
+      const threadTs = `17848${29900 + i}.${100000 + i}`;
+      const threadKey = `slack:${channelId}:${threadTs}`;
+      sevenThreadSearchParts.push([
+        `Channel: #eng${i} (ID: ${channelId})`,
+        `Permalink: [link](https://acme.slack.com/archives/${channelId}/p1784833918152799?thread_ts=${threadTs}&cid=${channelId})`,
+      ].join('\n'));
+      verdicts.push({
+        threadKey,
+        isOngoing: i < 4, // 4 ongoing, 3 resolved
+        ballInUsersCourt: i < 3,
+        waitingOn: i < 3 ? 'user' : null,
+        status: i < 4 ? 'in_progress' : 'completed',
+        summary: `Thread ${i} summary`,
+        reason: `reason ${i}`,
+      });
+    }
+    const searchText = sevenThreadSearchParts.join('\n');
+    const callMcpTool = vi.fn(async (name) => {
+      if (name === TOOL_NAMES.slackSearch) return { content: [{ text: searchText }], isError: false };
+      if (name === TOOL_NAMES.slackReadThread) {
+        return slackThreadResponse(slackThread.rawText);
+      }
+      throw new Error(`unexpected tool call: ${name}`);
+    });
+    const askClaude = vi.fn().mockResolvedValue(JSON.stringify(verdicts));
+    const app = createApp({ storage, callMcpTool, askClaude, toolNames: TOOL_NAMES });
+    const result = await app.runSlackTriage({ force: true });
+
+    expect(result.scanned).toBe(7);
+    expect(result.unparsed).toBe(0);
+    expect(result.ongoing).toBe(4); // 4 ongoing from verdicts
+    expect(result.added).toBe(4); // 4 added as new tasks (none were tracked)
+    expect(askClaude).toHaveBeenCalledTimes(1); // single batch call
+  });
+
   it('is debounced independently from refreshAll: a second call within 30s without force is skipped', async () => {
     const callMcpTool = mockCallMcpTool();
     const askClaude = vi.fn().mockResolvedValue(JSON.stringify(ONGOING_VERDICT));

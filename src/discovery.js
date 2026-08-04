@@ -46,6 +46,7 @@ export function linearCandidateToTask(issue, workspaceLabel) {
 // hard SyntaxError, not just a shadowing concern (see the build's
 // assertNoDuplicateTopLevelNames guard in build/inline.mjs).
 function stripSlackJsonCodeFences(text) {
+  if (typeof text !== 'string') return '';
   return text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
 }
 
@@ -93,21 +94,42 @@ export function buildSlackBatchPrompt(threads) {
 
 // Individual malformed entries are dropped, not the whole batch — one bad
 // object from the model must not cost every other thread in the same call
-// its verdict. Returns null only if the whole response isn't valid JSON.
+// its verdict. Returns a { verdicts, diagnostics } object. verdicts is a Map
+// (possibly empty), diagnostics captures the raw input for debugging when
+// parsing fails entirely.
 export function parseSlackBatchVerdicts(rawText) {
+  const diagnostics = { rawTextPrefix: (rawText ?? '').slice(0, 300), trimmedLength: 0, parseError: null, validCount: 0, droppedCount: 0 };
+  if (typeof rawText !== 'string' || !rawText.trim()) {
+    diagnostics.parseError = 'empty or non-string response';
+    return { verdicts: new Map(), diagnostics };
+  }
+
+  let stripped;
+  try {
+    stripped = stripSlackJsonCodeFences(rawText);
+  } catch {
+    diagnostics.parseError = 'stripSlackJsonCodeFences threw';
+    return { verdicts: new Map(), diagnostics };
+  }
+  diagnostics.trimmedLength = stripped.length;
+
   let parsed;
   try {
-    parsed = JSON.parse(stripSlackJsonCodeFences(rawText));
-  } catch {
-    return null;
+    parsed = JSON.parse(stripped);
+  } catch (e) {
+    diagnostics.parseError = `JSON parse error: ${e.message}`;
+    return { verdicts: new Map(), diagnostics };
   }
-  if (!Array.isArray(parsed)) return null;
+  if (!Array.isArray(parsed)) {
+    diagnostics.parseError = `response is not an array, got ${typeof parsed}`;
+    return { verdicts: new Map(), diagnostics };
+  }
 
   const verdicts = new Map();
   for (const entry of parsed) {
-    if (!entry || typeof entry.threadKey !== 'string') continue;
-    if (typeof entry.isOngoing !== 'boolean') continue;
-    if (!VALID_SLACK_STATUS.has(entry.status)) continue;
+    if (!entry || typeof entry.threadKey !== 'string') { diagnostics.droppedCount++; continue; }
+    if (typeof entry.isOngoing !== 'boolean') { diagnostics.droppedCount++; continue; }
+    if (!VALID_SLACK_STATUS.has(entry.status)) { diagnostics.droppedCount++; continue; }
     verdicts.set(entry.threadKey, {
       isOngoing: entry.isOngoing,
       ballInUsersCourt: Boolean(entry.ballInUsersCourt),
@@ -116,8 +138,9 @@ export function parseSlackBatchVerdicts(rawText) {
       summary: typeof entry.summary === 'string' ? entry.summary : '',
       reason: typeof entry.reason === 'string' ? entry.reason : '',
     });
+    diagnostics.validCount++;
   }
-  return verdicts;
+  return { verdicts, diagnostics };
 }
 
 // Slack search results come back as a formatted text blob (not structured

@@ -142,7 +142,7 @@ describe('parseSlackBatchVerdicts', () => {
   };
 
   it('parses a clean array response into a Map keyed by threadKey', () => {
-    const verdicts = parseSlackBatchVerdicts(JSON.stringify([validEntry]));
+    const { verdicts, diagnostics } = parseSlackBatchVerdicts(JSON.stringify([validEntry]));
     expect(verdicts.get('slack:C01:111.111')).toEqual({
       isOngoing: true,
       ballInUsersCourt: true,
@@ -151,35 +151,53 @@ describe('parseSlackBatchVerdicts', () => {
       summary: 'Devin is waiting on a go/no-go',
       reason: 'unanswered question from a bot counterpart',
     });
+    expect(diagnostics.validCount).toBe(1);
+    expect(diagnostics.droppedCount).toBe(0);
+    expect(diagnostics.parseError).toBeNull();
   });
 
   it('strips a code fence around the array', () => {
     const fenced = '```json\n' + JSON.stringify([validEntry]) + '\n```';
-    expect(parseSlackBatchVerdicts(fenced).size).toBe(1);
+    const { verdicts } = parseSlackBatchVerdicts(fenced);
+    expect(verdicts.size).toBe(1);
   });
 
   it('drops an individual malformed entry without discarding the rest of the batch', () => {
     const resolvedEntry = { ...validEntry, threadKey: 'slack:C02:222.222', isOngoing: false, status: 'completed' };
     const malformed = { threadKey: 'slack:C03:333.333' }; // missing isOngoing/status
-    const verdicts = parseSlackBatchVerdicts(JSON.stringify([validEntry, malformed, resolvedEntry]));
+    const { verdicts, diagnostics } = parseSlackBatchVerdicts(JSON.stringify([validEntry, malformed, resolvedEntry]));
     expect(verdicts.size).toBe(2);
     expect(verdicts.has('slack:C03:333.333')).toBe(false);
     expect(verdicts.get('slack:C02:222.222').isOngoing).toBe(false);
+    expect(diagnostics.validCount).toBe(2);
+    expect(diagnostics.droppedCount).toBe(1);
   });
 
   it('rejects an unrecognized status value', () => {
-    const verdicts = parseSlackBatchVerdicts(JSON.stringify([{ ...validEntry, status: 'archived' }]));
+    const { verdicts, diagnostics } = parseSlackBatchVerdicts(JSON.stringify([{ ...validEntry, status: 'archived' }]));
     expect(verdicts.size).toBe(0);
+    expect(diagnostics.droppedCount).toBe(1);
   });
 
   it('normalizes waitingOn to null when neither "user" nor "them"', () => {
-    const verdicts = parseSlackBatchVerdicts(JSON.stringify([{ ...validEntry, waitingOn: 'someone_else' }]));
+    const { verdicts } = parseSlackBatchVerdicts(JSON.stringify([{ ...validEntry, waitingOn: 'someone_else' }]));
     expect(verdicts.get('slack:C01:111.111').waitingOn).toBeNull();
   });
 
-  it('returns null for a response that is not a JSON array at all', () => {
-    expect(parseSlackBatchVerdicts('not json')).toBeNull();
-    expect(parseSlackBatchVerdicts(JSON.stringify({ threadKey: 'x' }))).toBeNull();
+  it('returns empty verdicts and parseError for a response that is not a JSON array at all', () => {
+    const r1 = parseSlackBatchVerdicts('not json');
+    expect(r1.verdicts.size).toBe(0);
+    expect(r1.diagnostics.parseError).toBeTruthy();
+
+    const r2 = parseSlackBatchVerdicts(JSON.stringify({ threadKey: 'x' }));
+    expect(r2.verdicts.size).toBe(0);
+    expect(r2.diagnostics.parseError).toBeTruthy();
+  });
+
+  it('returns parseError for empty/non-string input', () => {
+    const r1 = parseSlackBatchVerdicts('');
+    expect(r1.verdicts.size).toBe(0);
+    expect(r1.diagnostics.parseError).toContain('empty');
   });
 });
 

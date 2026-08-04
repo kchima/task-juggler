@@ -83,24 +83,28 @@ function canonicalize(task, rawContext) {
 // bad thread (retrying down to size 1 and still failing) as a per-thread
 // error instead of taking the whole scan down with it.
 async function classifySlackBatch(entries, askClaude) {
-  if (entries.length === 0) return { verdicts: new Map(), errors: [] };
+  if (entries.length === 0) return { verdicts: new Map(), diagnostics: [], errors: [] };
   try {
     const raw = await withTimeout(
       askClaude(buildSlackBatchPrompt(entries.map((e) => ({ threadKey: e.key, rawText: e.rawText }))), []),
       BRIDGE_CALL_TIMEOUT_MS,
       `Slack classification (${entries.length} thread${entries.length === 1 ? '' : 's'})`
     );
-    return { verdicts: parseSlackBatchVerdicts(raw) ?? new Map(), errors: [] };
+    const { verdicts, diagnostics } = parseSlackBatchVerdicts(raw);
+    if (diagnostics.parseError) {
+      console.warn('[task-juggler] Slack batch parse diagnostics:', diagnostics);
+    }
+    return { verdicts: verdicts ?? new Map(), diagnostics: [diagnostics], errors: [] };
   } catch (err) {
     if (entries.length === 1) {
-      return { verdicts: new Map(), errors: [`Slack classification (${entries[0].key}): ${err?.message ?? 'AI call failed'}`] };
+      return { verdicts: new Map(), diagnostics: [], errors: [`Slack classification (${entries[0].key}): ${err?.message ?? 'AI call failed'}`] };
     }
     const mid = Math.ceil(entries.length / 2);
     const [a, b] = await Promise.all([
       classifySlackBatch(entries.slice(0, mid), askClaude),
       classifySlackBatch(entries.slice(mid), askClaude),
     ]);
-    return { verdicts: new Map([...a.verdicts, ...b.verdicts]), errors: [...a.errors, ...b.errors] };
+    return { verdicts: new Map([...a.verdicts, ...b.verdicts]), diagnostics: [...a.diagnostics, ...b.diagnostics], errors: [...a.errors, ...b.errors] };
   }
 }
 
@@ -280,7 +284,7 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
   async function slackTriageForRefs(refsByKey, trackedByKey) {
     const scanned = refsByKey.size;
     if (scanned === 0) {
-      return { scanned: 0, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, newTasks: [], detected: [], errors: [] };
+      return { scanned: 0, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, newTasks: [], detected: [], errors: [], diagnostics: [] };
     }
 
     const fetched = await mapWithConcurrency([...refsByKey.entries()], CONCURRENCY, async ([key, ref]) => {
@@ -324,10 +328,10 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
     }
 
     if (toClassify.length === 0) {
-      return { scanned, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, newTasks: [], detected: [...detected.values()], errors: [] };
+      return { scanned, ongoing: 0, updated: 0, added: 0, skippedResolved: 0, unparsed: 0, aiCalled: false, newTasks: [], detected: [...detected.values()], errors: [], diagnostics: [] };
     }
 
-    const { verdicts, errors: classifyErrors } = await classifySlackBatch(toClassify, askClaude);
+    const { verdicts, diagnostics: classifyDiagnostics, errors: classifyErrors } = await classifySlackBatch(toClassify, askClaude);
 
     let ongoing = 0, updated = 0, added = 0, skippedResolved = 0, unparsed = 0;
     const newTasks = [];
@@ -382,7 +386,7 @@ export function createApp({ storage, callMcpTool, askClaude, toolNames, now = ()
       setWatermark(entry.key, signal, storage);
     }
 
-    return { scanned, ongoing, updated, added, skippedResolved, unparsed, aiCalled: true, newTasks, detected: [...detected.values()], errors: classifyErrors };
+    return { scanned, ongoing, updated, added, skippedResolved, unparsed, aiCalled: true, newTasks, detected: [...detected.values()], errors: classifyErrors, diagnostics: classifyDiagnostics };
   }
 
   // Slack discovery + refresh, batched: one AI call classifies every thread
