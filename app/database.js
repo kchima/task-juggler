@@ -72,6 +72,11 @@ export function initTestDb() {
 
 function rowToTask(row) {
   if (!row) return null;
+  // Deserialize JSON-stringified fields that may have been stored as objects
+  const tryParse = (v) => {
+    if (!v || typeof v !== 'string') return v;
+    try { const p = JSON.parse(v); return p && typeof p === 'object' ? p : v; } catch { return v; }
+  };
   return {
     id: row.id,
     parentId: row.parent_id,
@@ -82,8 +87,8 @@ function rowToTask(row) {
     estRemaining: row.est_remaining,
     dueDate: row.due_date || null,
     ballInUsersCourt: !!row.ball_in_users_court,
-    sourceRef: row.source_ref || null,
-    sourceUrl: row.source_url || null,
+    sourceRef: tryParse(row.source_ref),
+    sourceUrl: tryParse(row.source_url),
     sourceType: row.source_type || null,
     sortOrder: row.sort_order,
     createdAt: row.created_at,
@@ -124,6 +129,9 @@ export function createTask({ id, parentId, title, description, status, priority,
   const conn = getDb();
   const now = new Date().toISOString();
   const order = sortOrder ?? Date.now();
+  // better-sqlite3 v13 rejects JS objects as bound parameters, so
+  // serialize objects (e.g. legacy sourceRef from artifact state) to JSON.
+  const serialize = (v) => (v !== null && typeof v === 'object' ? JSON.stringify(v) : v);
 
   conn.prepare(`
     INSERT INTO tasks (id, parent_id, title, description, status, priority, est_remaining, due_date, ball_in_users_court, source_ref, source_url, source_type, sort_order, created_at, updated_at)
@@ -131,7 +139,7 @@ export function createTask({ id, parentId, title, description, status, priority,
   `).run(
     id, parentId || null, title, description || '', status || 'not_started',
     priority || 'medium', estRemaining || 'medium', dueDate || null,
-    ballInUsersCourt ? 1 : 0, sourceRef || null, sourceUrl || null,
+    ballInUsersCourt ? 1 : 0, serialize(sourceRef) || null, sourceUrl || null,
     sourceType || null, order, now, now
   );
   return getTaskById(id);
