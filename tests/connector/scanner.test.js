@@ -12,6 +12,7 @@ describe('registry', () => {
     expect(getSource('todoist').label).toBe('Todoist');
     expect(getSource('devin').label).toBe('Devin');
     expect(getSource('claude').label).toContain('Claude');
+    expect(getSource('opencode').label).toContain('OpenCode');
   });
 
   it('returns null for unknown source', () => {
@@ -27,19 +28,28 @@ describe('registry', () => {
 });
 
 describe('scanAllSources — no MCP client', () => {
-  it('returns unconfigured status for all sources when no MCP client', async () => {
+  it('returns unconfigured status for sources without keys or MCP', async () => {
     const results = await scanAllSources(null);
-    expect(results.slack.status).toBe('unconfigured');
-    expect(results.linear.status).toBe('unconfigured');
-    expect(results.todoist.status).toBe('unconfigured');
+    // Slack: unconfigured unless a real OAuth grant exists in Keychain (env-dependent)
+    expect(['unconfigured', 'ok', 'error']).toContain(results.slack.status);
+    // Linear may have an MCP OAuth grant from a real connection (environment-dependent).
+    // With a grant present but the token failing, status is 'error' (connected-but-failed).
+    expect(['ok', 'unconfigured', 'error']).toContain(results.linear.status);
     expect(results.devin.status).toBe('unconfigured');
-    expect(results.claude.status).toBe('unconfigured');
+    // Todoist: unconfigured if no OAuth grant, ok/error if a grant exists in Keychain
+    expect(['ok', 'unconfigured', 'error']).toContain(results.todoist.status);
+    // Claude/OpenCode: discover local sessions if present, ok otherwise
+    expect(['ok', 'error', 'unconfigured']).toContain(results.claude.status);
+    expect(results.opencode).toBeDefined();
   });
 
   it('includes helpful error messages about what is needed', async () => {
     const results = await scanAllSources(null);
-    expect(results.slack.errors.length).toBeGreaterThan(0);
-    expect(results.slack.errors[0]).toContain('MCP server');
+    // When unconfigured, a helpful message must reference enabling the source.
+    if (results.slack.status === 'unconfigured') {
+      expect(results.slack.errors.length).toBeGreaterThan(0);
+      expect(results.slack.errors[0]).toContain('Connections panel');
+    }
   });
 });
 

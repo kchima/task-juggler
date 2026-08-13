@@ -42,6 +42,33 @@ function postJson(url, body, options = {}) {
   });
 }
 
+function postFormUrl(url, params, options = {}) {
+  return new Promise((resolve, reject) => {
+    const proto = url.startsWith('https') ? https : http;
+    const data = new URLSearchParams(params).toString();
+    const urlObj = new URL(url);
+    const req = proto.request({
+      hostname: urlObj.hostname,
+      port: urlObj.port || (url.startsWith('https') ? 443 : 80),
+      path: urlObj.pathname + (urlObj.search || ''),
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(data),
+        ...options.headers,
+      },
+    }, (res) => {
+      let responseData = '';
+      res.on('data', (chunk) => { responseData += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: responseData }));
+    });
+    req.on('error', reject);
+    req.setTimeout(options.timeout || 15000, () => { req.destroy(new Error('Request timed out')); });
+    req.write(data);
+    req.end();
+  });
+}
+
 // --- Adapter: Linear via GraphQL API ---
 
 export async function scanLinearDirect(apiKey) {
@@ -103,7 +130,7 @@ export async function scanLinearDirect(apiKey) {
   return result;
 }
 
-// --- Adapter: Todoist via REST API ---
+// --- Adapter: Todoist via Sync API (v1 — REST v2 is deprecated/410) ---
 
 export async function scanTodoistDirect(apiToken) {
   const result = { sourceId: 'todoist', status: 'ok', items: [], errors: [], detected: [] };
@@ -115,26 +142,51 @@ export async function scanTodoistDirect(apiToken) {
   }
 
   try {
-    const response = await fetchUrl('https://api.todoist.com/rest/v2/tasks?filter=today|overdue|p1&limit=50', {
+    // Use the Sync API (POST form-encoded) — REST v2 returns 410 Gone
+    const response = await postFormUrl('https://api.todoist.com/api/v1/sync', {
+      sync_token: '*',
+      resource_types: JSON.stringify(['items', 'projects', 'labels']),
+    }, {
       headers: { 'Authorization': `Bearer ${apiToken}` },
     });
 
     if (response.status !== 200) {
       result.status = 'error';
-      result.errors.push(`Todoist API returned status ${response.status}`);
+      result.errors.push(`Todoist Sync API returned status ${response.status}`);
+      if (response.body) {
+        try {
+          const err = JSON.parse(response.body);
+          if (err.error) result.errors.push(err.error);
+        } catch {}
+      }
       return result;
     }
 
-    const tasks = JSON.parse(response.body);
-    for (const task of tasks) {
-      const key = `todoist:${task.id}`;
-      const isUrgent = task.priority === 1 || (task.due?.date && new Date(task.due.date) <= new Date());
-      result.items.push({ key, label: task.content, url: task.url || null });
-      result.detected.push({ key, label: task.content, outcome: isUrgent ? 'added' : 'skipped-gate' });
+    const data = JSON.parse(response.body);
+    const items = data.items || [];
+    const projects = data.projects || [];
+
+    // Build a project name lookup
+    const projectNames = {};
+    for (const p of projects) {
+      projectNames[p.id] = p.name;
+    }
+
+    for (const item of items) {
+      // Skip completed items
+      if (item.checked === 1) continue;
+
+      const key = `todoist:${item.id}`;
+      const projectName = projectNames[item.project_id] || '';
+      const label = item.content + (projectName ? ` (${projectName})` : '');
+      const isUrgent = item.priority === 1 || item.priority === 2;
+
+      result.items.push({ key, label, url: null });
+      result.detected.push({ key, label: item.content, outcome: isUrgent ? 'added' : 'skipped-gate' });
     }
   } catch (err) {
     result.status = 'error';
-    result.errors.push(`Todoist API: ${err.message}`);
+    result.errors.push(`Todoist Sync API: ${err.message}`);
   }
 
   return result;

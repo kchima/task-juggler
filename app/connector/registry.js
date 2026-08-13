@@ -43,19 +43,29 @@ export const SOURCES = {
     hasDirectFallback: true,
     capabilities: ['list_sessions'],
   },
-  claude: {
+claude: {
     id: 'claude',
-    label: 'Claude / Cowork',
+    label: 'Claude',
     icon: '✦',
-    description: 'Claude Code / Cowork sessions',
+    description: 'Claude Code and Desktop local sessions',
     requiresMCP: false,
     hasDirectFallback: false,
-    capabilities: [],
-    note: 'Session listing is blocked at the Cowork artifact bridge layer — use the juggler skill in chat to scan.',
+    supportsLocalDiscovery: true,
+    capabilities: ['list_sessions'],
+  },
+  opencode: {
+    id: 'opencode',
+    label: 'OpenCode',
+    icon: '⌘',
+    description: 'Unfinished todos from local OpenCode sessions',
+    requiresMCP: false,
+    hasDirectFallback: false,
+    supportsLocalDiscovery: true,
+    capabilities: ['list_todos'],
   },
 };
 
-export const SOURCE_ORDER = ['slack', 'linear', 'todoist', 'devin', 'claude'];
+export const SOURCE_ORDER = ['slack', 'linear', 'todoist', 'devin', 'claude', 'opencode'];
 
 export function getSource(id) {
   return SOURCES[id] || null;

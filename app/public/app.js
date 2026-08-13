@@ -2,9 +2,73 @@
 
 const API_BASE = '/api';
 
-let state = { tasks: [], tree: [], counts: {}, selected: new Set(), sources: null };
+let state = { tasks: [], tree: [], counts: {}, selected: new Set(), sources: null, connections: {} };
 
-// --- API helpers ---
+// ─── Provider metadata ────────────────────────────────────────────────────
+const PROVIDERS = {
+  slack: {
+    id: 'slack',
+    name: 'Slack',
+    icon: '💬',
+    color: '#4a154b',
+    supportsOAuth: true,
+    isMcpOAuth: true,
+    description: 'Messages, threads, and files',
+  },
+  linear: {
+    id: 'linear',
+    name: 'Linear',
+    icon: '⬡',
+    color: '#5e6ad2',
+    supportsOAuth: true,
+    isMcpOAuth: true,
+    description: 'Issues and projects',
+  },
+  todoist: {
+    id: 'todoist',
+    name: 'Todoist',
+    icon: '✓',
+    color: '#e44332',
+    supportsOAuth: true,
+    isMcpOAuth: true,
+    description: 'Tasks and projects',
+  },
+  devin: {
+    id: 'devin',
+    name: 'Devin',
+    icon: 'Δ',
+    supportsOAuth: false,
+    supportsMCP: false,
+    supportsToken: true,
+    description: 'Active sessions',
+    tokenLabel: 'DEVIN_API_TOKEN',
+    tokenHint: '...',
+  },
+  claude: {
+    id: 'claude',
+    name: 'Claude',
+    icon: '✦',
+    supportsOAuth: false,
+    supportsMCP: false,
+    supportsToken: false,
+    description: 'Local Code and Desktop sessions',
+  },
+  opencode: {
+    id: 'opencode',
+    name: 'OpenCode',
+    icon: '⌘',
+    supportsOAuth: false,
+    supportsMCP: false,
+    supportsToken: false,
+    description: 'Unfinished local OpenCode todos',
+  },
+};
+
+// Track which OAuth provider is currently being set up
+let _pendingAuth = null;
+let _pollAuthInterval = null;
+
+// ─── API helpers ──────────────────────────────────────────────────────────
 async function api(path, options = {}) {
   const resp = await fetch(`${API_BASE}${path}`, {
     headers: { 'Content-Type': 'application/json' },
@@ -31,7 +95,7 @@ async function createTask(body) {
   return data.task;
 }
 
-async function updateTask(id, body) {
+async function updateTaskApi(id, body) {
   const data = await api(`/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
   return data.task;
 }
@@ -46,7 +110,140 @@ async function batchAction(ids, action, newStatus) {
   await api('/tasks/batch', { method: 'POST', body: JSON.stringify(body) });
 }
 
-// --- UI helpers ---
+// ─── Connection management ────────────────────────────────────────────────
+
+async function loadConnections() {
+  try {
+    const data = await api('/auth/status');
+    state.connections = data.statuses || {};
+
+    // Also check which providers have app credentials configured (e.g. Slack)
+    for (const providerId of ['slack', 'linear', 'todoist', 'devin']) {
+      try {
+        const setupData = await api(`/auth/mcp-setup/${providerId}`);
+        if (setupData.configured) {
+          // Mark as having app credentials — frontend will show "Connect" button
+          state.connections[providerId] = {
+            ...(state.connections[providerId] || { connected: false, providerId }),
+            appConfigured: true,
+          };
+        }
+      } catch {
+        // Provider may not exist or setup route not available
+      }
+    }
+  } catch {
+    state.connections = {};
+  }
+}
+
+/**
+ * Start OAuth authorization for a provider.
+ * Uses MCP OAuth for providers with hosted MCP endpoints, 
+ * falls back to direct OAuth for others.
+ */
+async function handleConnect(providerId) {
+  const provider = PROVIDERS[providerId];
+  if (!provider) return;
+
+  const connectBtn = document.querySelector(`[data-connect="${providerId}"]`);
+  if (connectBtn) {
+    connectBtn.disabled = true;
+    connectBtn.textContent = 'Opening browser…';
+  }
+
+  try {
+    // Use MCP OAuth for providers that support it, else legacy direct OAuth
+    const endpoint = provider.isMcpOAuth ? '/auth/mcp-start' : '/auth/start';
+    const data = await api(`${endpoint}/${providerId}`, { method: 'POST' });
+    _pendingAuth = { providerId, state: data.state };
+
+    // Open in new browser window
+    const authWindow = window.open(data.authUrl, '_blank', 'width=800,height=700');
+
+    if (!authWindow || authWindow.closed || typeof authWindow.closed === 'undefined') {
+      window.location.href = data.authUrl;
+      return;
+    }
+
+    startPollingForConnection(providerId);
+  } catch (err) {
+    showToast(`Connection failed: ${err.message}`, 'error');
+    if (connectBtn) {
+      connectBtn.disabled = false;
+      connectBtn.textContent = 'Connect';
+    }
+    _pendingAuth = null;
+  }
+}
+
+/**
+ * Poll for connection status after initiating OAuth.
+ */
+function startPollingForConnection(providerId) {
+  // Clear any existing poll
+  if (_pollAuthInterval) {
+    clearInterval(_pollAuthInterval);
+  }
+
+  let attempts = 0;
+  const maxAttempts = 60; // 2 minutes (2s interval)
+
+  _pollAuthInterval = setInterval(async () => {
+    attempts++;
+    try {
+      const data = await api(`/auth/status/${providerId}`);
+      if (data.status && data.status.connected) {
+        clearInterval(_pollAuthInterval);
+        _pollAuthInterval = null;
+        _pendingAuth = null;
+        state.connections[providerId] = data.status;
+        showToast(`Connected to ${PROVIDERS[providerId]?.name || providerId}`, 'success');
+        render();
+
+        // Auto-scan after connection
+        handleRefresh();
+      }
+    } catch {
+      // Ignore polling errors
+    }
+
+    if (attempts >= maxAttempts) {
+      clearInterval(_pollAuthInterval);
+      _pollAuthInterval = null;
+      if (_pendingAuth) {
+        _pendingAuth = null;
+        showToast('Authorization timed out. Please try again.', 'error');
+        render();
+      }
+    }
+  }, 2000);
+}
+
+/**
+ * Disconnect a provider (revoke + remove credentials).
+ */
+async function handleDisconnect(providerId) {
+  if (!confirm(`Disconnect ${PROVIDERS[providerId]?.name || providerId}? This will revoke access.`)) return;
+
+  try {
+    // Try MCP disconnect first, fall back to legacy
+    try {
+      await api(`/auth/mcp-disconnect/${providerId}`, { method: 'POST' });
+    } catch {
+      await api(`/auth/disconnect/${providerId}`, { method: 'POST' });
+    }
+    // Also update local state
+    try { await api(`/auth/disconnect/${providerId}`, { method: 'POST' }); } catch {}
+    state.connections[providerId] = { connected: false };
+    showToast(`Disconnected from ${PROVIDERS[providerId]?.name || providerId}`, 'success');
+    render();
+  } catch (err) {
+    showToast(`Disconnect failed: ${err.message}`, 'error');
+  }
+}
+
+// ─── UI helpers ───────────────────────────────────────────────────────────
 function prioritize(tasks) {
   const score = (t) => {
     let s = 0;
@@ -91,31 +288,7 @@ function partitionTasks() {
   };
 }
 
-// --- Source label / icon helpers ---
-const SOURCE_META = {
-  slack:  { icon: '💬', label: 'Slack', keyLabel: 'SLACK_BOT_TOKEN', keyHint: 'xoxb-...' },
-  linear: { icon: '⬡', label: 'Linear', keyLabel: 'LINEAR_API_KEY', keyHint: 'lin_api_...' },
-  todoist:{ icon: '✓', label: 'Todoist', keyLabel: 'TODOIST_API_TOKEN', keyHint: '...' },
-  devin:  { icon: 'Δ', label: 'Devin', keyLabel: 'DEVIN_API_TOKEN', keyHint: '...' },
-  claude: { icon: '✦', label: 'Claude/Cowork' },
-};
-
-// Stored API keys (in-memory on frontend, sent with each scan)
-let _apiKeys = {};
-
-// Load any saved keys from the server on init
-async function loadApiKeys() {
-  try {
-    const data = await api('/sources/keys');
-    if (data.keys) {
-      for (const [sid, info] of Object.entries(data.keys)) {
-        if (info.configured) _apiKeys[sid] = true; // mark as configured (actual key is server-side)
-      }
-    }
-  } catch { /* server may be starting up */ }
-}
-
-// --- Render ---
+// ─── Render ───────────────────────────────────────────────────────────────
 function render() {
   const { active, notStarted, completed } = partitionTasks();
 
@@ -124,7 +297,6 @@ function render() {
   renderTaskList('completedList', completed, 'completed');
 
   // Count badges
-  const notStartedEl = document.getElementById('notStartedList');
   document.getElementById('notStartedCount').textContent = notStarted.length;
   document.getElementById('completedCount').textContent = completed.length;
 
@@ -133,6 +305,7 @@ function render() {
   document.getElementById('taskCount').textContent = `${active.length} active${notStarted.length > 0 ? ` + ${notStarted.length} pending` : ''}`;
 
   // Collapse state persists
+  const notStartedEl = document.getElementById('notStartedList');
   if (!notStartedEl.classList.contains('collapsed')) {
     const toggle = document.querySelector('[data-target="notStartedList"] .collapse-toggle');
     if (toggle) toggle.classList.add('open');
@@ -149,64 +322,170 @@ function render() {
 
 function renderSourcesPanel() {
   const container = document.getElementById('sourcesContent');
-  if (!state.sources) {
-    container.innerHTML = '<div class="source-entry"><div class="source-empty">Click Refresh to scan for new tasks from Slack, Linear, Todoist, and Devin.</div></div>';
-    document.getElementById('sourcesSummary').textContent = '';
-    return;
-  }
-
-  const results = state.sources.results || {};
-  const entries = Object.entries(results);
-  const totalErrors = entries.filter(([, r]) => (r.errors || []).length > 0).length;
-  const totalItems = entries.reduce((sum, [, r]) => sum + (r.items || []).length, 0);
-
+  const connectedCount = Object.values(state.connections).filter((c) => c && c.connected).length;
   document.getElementById('sourcesSummary').textContent =
-    `${totalItems} found${totalErrors > 0 ? `, ${totalErrors} with errors` : ''}`;
+    connectedCount > 0 ? `${connectedCount} connected` : '';
 
-  container.innerHTML = entries.map(([sourceId, result]) => {
-    const meta = SOURCE_META[sourceId] || { icon: '?', label: sourceId };
-    const errors = result.errors || [];
-    const items = result.items || [];
-    const hasKeys = !!_apiKeys[sourceId];
-    const statusClass = errors.length > 0 ? 'error' : (result.status || 'ok');
+  const scanResults = state.sources?.results || {};
 
-    // Only show configure option for sources that support direct API keys
-    const showConfig = meta.keyLabel && ['slack', 'linear', 'todoist', 'devin'].includes(sourceId);
+  container.innerHTML = Object.values(PROVIDERS).map((provider) => {
+    const conn = state.connections[provider.id];
+    const scanResult = scanResults[provider.id];
 
-    return `
-      <div class="source-entry" data-source="${sourceId}">
-        <div class="source-icon-label">
-          <span>${meta.icon}</span>
-          <span>${meta.label}</span>
-          <span class="source-status ${statusClass}">${statusClass}</span>
-          ${hasKeys ? '<span class="source-status ok" style="margin-left:4px;">key set</span>' : ''}
-          ${showConfig ? `<button class="btn small source-config-btn" data-source="${sourceId}" style="margin-left:4px;">🔑</button>` : ''}
-        </div>
-        <div class="source-items">
-          ${showConfig ? `
-            <div class="source-key-config hidden" data-source="${sourceId}" id="key-config-${sourceId}">
-              <input type="password" class="source-key-input" data-source="${sourceId}" placeholder="${meta.keyLabel} (${meta.keyHint})" style="width:100%;padding:4px 8px;margin-bottom:4px;background:var(--bg);border:1px solid var(--border);border-radius:3px;color:var(--text);font-size:0.8rem;">
-              <button class="btn small source-key-save" data-source="${sourceId}" style="margin-bottom:6px;">Save Key</button>
+    return renderSourceEntry(provider, conn, scanResult);
+  }).join('');
+}
+
+function renderSourceEntry(provider, conn, scanResult) {
+  const isConnected = conn && conn.connected;
+  const isPendingOAuth = _pendingAuth && _pendingAuth.providerId === provider.id;
+  const hasToken = provider.supportsToken;
+  const scanItems = scanResult?.items || [];
+  const scanErrors = scanResult?.errors || [];
+
+  // Action buttons
+  let actionHtml = '';
+  if (provider.isMcpOAuth) {
+    if (provider.id === 'slack') {
+      // Slack needs a setup guide + credential entry before Connect with browser
+      const hasClientCreds = conn && conn.appConfigured;
+      if (isConnected) {
+        const scopeLabel = conn.scope ? conn.scope.split(' ').slice(0, 2).join(', ') : '';
+        actionHtml = `
+          <div class="conn-status">
+            <span class="conn-badge connected">Connected</span>
+            ${conn.mcpUrl ? `<span class="conn-scope">MCP</span>` : ''}
+            ${scopeLabel ? `<span class="conn-scope">${escapeHtml(scopeLabel)}</span>` : ''}
+            <button class="btn small conn-disconnect" data-disconnect="${provider.id}">Disconnect</button>
+          </div>
+        `;
+      } else if (isPendingOAuth) {
+        actionHtml = `
+          <div class="conn-status">
+            <span class="spinner"></span>
+            <span class="conn-pending">Waiting for browser authorization…</span>
+          </div>
+        `;
+      } else if (!hasClientCreds) {
+        actionHtml = `
+          <div class="conn-status">
+            <span class="conn-unavailable">Deferred — requires a registered Slack app</span>
+          </div>
+          <div class="slack-advanced">
+            <button class="btn small conn-setup" data-setup="${provider.id}">
+              Advanced: configure your own Slack app
+            </button>
+            <div class="slack-warning">
+              Use your own Slack app credentials only. Do not paste third-party
+              or partner client IDs/secrets. Task Juggler's hosted Slack integration
+              is not available yet.
             </div>
-          ` : ''}
-          ${items.length === 0 && errors.length === 0
-            ? `<div class="source-empty">No items found.</div>`
-            : items.map((item) => `
-              <div class="source-item">
-                <span class="item-label" title="${escapeHtml(item.label)}">${escapeHtml(item.label)}</span>
-                ${item.outcome ? `<span class="item-outcome ${item.outcome}">${item.outcome}</span>` : ''}
-              </div>
-            `).join('')
-          }
-          ${errors.length > 0 ? `
-            <div class="source-errors">
-              ${errors.map((e) => `<div class="source-error">⚠ ${escapeHtml(e)}</div>`).join('')}
+          </div>
+          <div class="conn-setup-config hidden" data-setup-config="${provider.id}">
+            <div class="setup-guide">
+              <p><strong>To connect Slack with your own app, first create one:</strong></p>
+              <ol>
+                <li>Go to <a href="https://api.slack.com/apps" target="_blank">api.slack.com/apps</a></li>
+                <li>Click <strong>Create New App → From scratch</strong></li>
+                <li>Go to <strong>OAuth & Permissions</strong> → enable <strong>PKCE</strong> (one-way)</li>
+                <li>Add <strong>Redirect URL</strong>: <code>http://localhost:3000/api/auth/mcp-callback/slack</code></li>
+                <li>Add <strong>User Token Scopes</strong>:<br>
+                  <code>search:read.public, search:read.private, channels:history,<br>
+                  groups:history, mpim:history, im:history, users:read,<br>
+                  channels:read, files:read, emoji:read, reactions:read</code></li>
+                <li>Go to <strong>Basic Information</strong> and copy <strong>Client ID</strong> and <strong>Client Secret</strong></li>
+              </ol>
             </div>
-          ` : ''}
-        </div>
+            <div class="setup-form">
+              <input type="text" class="conn-client-input" data-client-input="${provider.id}" placeholder="Client ID (e.g. 12345.67890)">
+              <input type="password" class="conn-secret-input" data-secret-input="${provider.id}" placeholder="Client Secret">
+              <button class="btn small primary conn-client-save" data-client-save="${provider.id}">Save & Connect</button>
+            </div>
+          </div>
+        `;
+      } else {
+        actionHtml = `
+          <div class="conn-status">
+            <button class="btn small primary conn-connect" data-connect="${provider.id}">
+              Connect with browser
+            </button>
+          </div>
+        `;
+      }
+    } else {
+      // MCP OAuth — zero-setup, just "Connect with browser" (Linear, Todoist)
+      if (isConnected) {
+        const scopeLabel = conn.scope ? conn.scope.split(' ').slice(0, 2).join(', ') : '';
+        actionHtml = `
+          <div class="conn-status">
+            <span class="conn-badge connected">Connected</span>
+            ${conn.mcpUrl ? `<span class="conn-scope">MCP</span>` : ''}
+            ${scopeLabel ? `<span class="conn-scope">${escapeHtml(scopeLabel)}</span>` : ''}
+            <button class="btn small conn-disconnect" data-disconnect="${provider.id}">Disconnect</button>
+          </div>
+        `;
+      } else if (isPendingOAuth) {
+        actionHtml = `
+          <div class="conn-status">
+            <span class="spinner"></span>
+            <span class="conn-pending">Waiting for browser authorization…</span>
+          </div>
+        `;
+      } else {
+        actionHtml = `
+          <div class="conn-status">
+            <button class="btn small primary conn-connect" data-connect="${provider.id}">
+              Connect with browser
+            </button>
+          </div>
+        `;
+      }
+    }
+  } else if (hasToken) {
+    // Non-OAuth token-based (Devin)
+    actionHtml = `
+      <div class="conn-status">
+        <button class="btn small conn-token-toggle" data-token-toggle="${provider.id}">API Token</button>
+      </div>
+      <div class="conn-token-config hidden" data-token-config="${provider.id}">
+        <input type="password" class="conn-token-input" data-token-input="${provider.id}" placeholder="${provider.tokenLabel} (${provider.tokenHint})">
+        <button class="btn small conn-token-save" data-token-save="${provider.id}">Save</button>
       </div>
     `;
-  }).join('');
+  } else if (provider.id === 'claude' || provider.id === 'opencode') {
+    actionHtml = `
+      <div class="conn-status">
+        <span class="conn-unavailable">Local discovery only</span>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="source-entry" data-source="${provider.id}">
+      <div class="source-icon-label" style="${provider.color ? `--provider-color: ${provider.color}` : ''}">
+        <span class="source-icon">${provider.icon}</span>
+        <span class="source-name">${provider.name}</span>
+      </div>
+      <div class="source-items">
+        ${actionHtml}
+        ${scanItems.length > 0 ? `
+          <div class="scan-items">
+            ${scanItems.slice(0, 5).map((item) => `
+              <div class="scan-item" title="${escapeHtml(item.label)}">
+                <span>${escapeHtml(item.label)}</span>
+              </div>
+            `).join('')}
+            ${scanItems.length > 5 ? `<div class="scan-item-more">+${scanItems.length - 5} more</div>` : ''}
+          </div>
+        ` : ''}
+        ${scanErrors.length > 0 ? `
+          <div class="scan-errors">
+            ${scanErrors.map((e) => `<div class="scan-error">⚠ ${escapeHtml(e)}</div>`).join('')}
+          </div>
+        ` : ''}
+      </div>
+    </div>
+  `;
 }
 
 function renderTaskList(containerId, tasks, listType) {
@@ -269,7 +548,7 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-// --- Event handling ---
+// ─── Event handling ───────────────────────────────────────────────────────
 function setupEventListeners() {
   // Task list clicks (delegated)
   document.addEventListener('click', (e) => {
@@ -304,6 +583,74 @@ function setupEventListeners() {
     }
   });
 
+  // Connection OAuth handlers
+  document.addEventListener('click', (e) => {
+    const connectBtn = e.target.closest('[data-connect]');
+    if (connectBtn) {
+      handleConnect(connectBtn.dataset.connect);
+      return;
+    }
+
+    const disconnectBtn = e.target.closest('[data-disconnect]');
+    if (disconnectBtn) {
+      handleDisconnect(disconnectBtn.dataset.disconnect);
+      return;
+    }
+
+    // App setup toggle (for Slack-style providers)
+    const setupBtn = e.target.closest('[data-setup]');
+    if (setupBtn) {
+      const providerId = setupBtn.dataset.setup;
+      const configEl = document.querySelector(`[data-setup-config="${providerId}"]`);
+      if (configEl) {
+        configEl.classList.toggle('hidden');
+      }
+      return;
+    }
+
+    // Client ID + Secret save (for Slack — non-DCR OAuth providers)
+    const clientSaveBtn = e.target.closest('[data-client-save]');
+    if (clientSaveBtn) {
+      const providerId = clientSaveBtn.dataset.clientSave;
+      const clientInput = document.querySelector(`[data-client-input="${providerId}"]`);
+      const secretInput = document.querySelector(`[data-secret-input="${providerId}"]`);
+      if (clientInput && clientInput.value.trim()) {
+        handleSaveClientCredentials(providerId, clientInput.value.trim(), secretInput?.value?.trim() || '');
+        clientInput.value = '';
+        if (secretInput) secretInput.value = '';
+        const configEl = document.querySelector(`[data-setup-config="${providerId}"]`);
+        if (configEl) configEl.classList.add('hidden');
+      } else {
+        showToast('Client ID is required', 'error');
+      }
+      return;
+    }
+  });
+
+  // API token configuration (for Devin — non-OAuth source)
+  document.addEventListener('click', (e) => {
+    const tokenToggle = e.target.closest('[data-token-toggle]');
+    if (tokenToggle) {
+      const sid = tokenToggle.dataset.tokenToggle;
+      const configEl = document.querySelector(`[data-token-config="${sid}"]`);
+      if (configEl) configEl.classList.toggle('hidden');
+      return;
+    }
+
+    const tokenSave = e.target.closest('[data-token-save]');
+    if (tokenSave) {
+      const sid = tokenSave.dataset.tokenSave;
+      const input = document.querySelector(`[data-token-input="${sid}"]`);
+      if (input && input.value.trim()) {
+        handleSaveDevinToken(input.value.trim());
+        input.value = '';
+        const configEl = document.querySelector(`[data-token-config="${sid}"]`);
+        if (configEl) configEl.classList.add('hidden');
+      }
+      return;
+    }
+  });
+
   // Collapsible sections
   document.addEventListener('click', (e) => {
     const title = e.target.closest('.section-title.collapsible');
@@ -335,31 +682,8 @@ function setupEventListeners() {
   // Import
   document.getElementById('importBtn').addEventListener('click', handleImport);
 
-  // Refresh button — scan all sources
+  // Refresh button
   document.getElementById('refreshBtn').addEventListener('click', handleRefresh);
-
-  // API key configuration (delegated)
-  document.addEventListener('click', (e) => {
-    const configBtn = e.target.closest('.source-config-btn');
-    if (configBtn) {
-      const sid = configBtn.dataset.source;
-      const configEl = document.getElementById(`key-config-${sid}`);
-      if (configEl) configEl.classList.toggle('hidden');
-      return;
-    }
-    const saveBtn = e.target.closest('.source-key-save');
-    if (saveBtn) {
-      const sid = saveBtn.dataset.source;
-      const input = document.querySelector(`.source-key-input[data-source="${sid}"]`);
-      if (input && input.value.trim()) {
-        handleSaveApiKey(sid, input.value.trim());
-        input.value = '';
-        const configEl = document.getElementById(`key-config-${sid}`);
-        if (configEl) configEl.classList.add('hidden');
-      }
-      return;
-    }
-  });
 
   // Keyboard shortcuts
   document.addEventListener('keydown', (e) => {
@@ -374,7 +698,7 @@ function setupEventListeners() {
   });
 }
 
-// --- Actions ---
+// ─── Actions ──────────────────────────────────────────────────────────────
 async function handleCheckbox(id) {
   if (state.selected.has(id)) {
     state.selected.delete(id);
@@ -412,13 +736,13 @@ async function handleBatch(action) {
         break;
       case 'setActive':
         for (const id of state.selected) {
-          await updateTask(id, { status: 'in_progress' });
+          await updateTaskApi(id, { status: 'in_progress' });
         }
         showToast(`Activated ${state.selected.size} tasks`, 'success');
         break;
       case 'setNotStarted':
         for (const id of state.selected) {
-          await updateTask(id, { status: 'not_started' });
+          await updateTaskApi(id, { status: 'not_started' });
         }
         showToast(`Moved ${state.selected.size} to not started`, 'success');
         break;
@@ -436,7 +760,7 @@ async function handleBatch(action) {
 
 async function handleStartTask(id) {
   try {
-    await updateTask(id, { status: 'in_progress' });
+    await updateTaskApi(id, { status: 'in_progress' });
     await loadTasks();
     showToast('Task started', 'success');
   } catch (err) {
@@ -446,7 +770,7 @@ async function handleStartTask(id) {
 
 async function handlePauseTask(id) {
   try {
-    await updateTask(id, { status: 'not_started' });
+    await updateTaskApi(id, { status: 'not_started' });
     await loadTasks();
   } catch (err) {
     showToast(`Error: ${err.message}`, 'error');
@@ -455,7 +779,7 @@ async function handlePauseTask(id) {
 
 async function handleCompleteTask(id) {
   try {
-    await updateTask(id, { status: 'completed' });
+    await updateTaskApi(id, { status: 'completed' });
     await loadTasks();
     showToast('Task completed', 'success');
   } catch (err) {
@@ -500,7 +824,7 @@ function handleInlineEdit(titleEl) {
     const newTitle = input.value.trim();
     if (newTitle && newTitle !== currentText) {
       try {
-        await updateTask(id, { title: newTitle });
+        await updateTaskApi(id, { title: newTitle });
         await loadTasks();
       } catch (err) {
         showToast(`Error: ${err.message}`, 'error');
@@ -529,54 +853,153 @@ async function handleCreateSubtask(parentId) {
   }
 }
 
-// --- API key management ---
-async function handleSaveApiKey(sourceId, key) {
+// ─── API token management (for Devin only) ──────────────────────────────
+async function handleSaveDevinToken(token) {
   try {
-    // First save to server (persists in memory)
-    const body = { keys: { [sourceId]: key } };
+    const body = { keys: { devin: token } };
     await api('/sources/keys', { method: 'POST', body: JSON.stringify(body) });
-    _apiKeys[sourceId] = key;
-    showToast(`${SOURCE_META[sourceId]?.label || sourceId} API key saved`, 'success');
-    // Immediately scan with the new key
+    showToast('Devin token saved', 'success');
     await handleRefresh();
   } catch (err) {
-    showToast(`Failed to save key: ${err.message}`, 'error');
+    showToast(`Failed to save token: ${err.message}`, 'error');
   }
 }
 
-// --- Refresh (scan sources) ---
-async function handleRefresh() {
+// ─── Slack app credential management ────────────────────────────────────
+async function handleSaveClientCredentials(providerId, clientId, clientSecret) {
+  try {
+    await api(`/auth/mcp-setup/${providerId}`, {
+      method: 'POST',
+      body: JSON.stringify({ clientId, clientSecret }),
+    });
+    showToast(`${PROVIDERS[providerId]?.name || providerId} app credentials saved`, 'success');
+
+    // Reload connections to update the UI with "Connect" button
+    await loadConnections();
+    render();
+
+    // Now automatically start the OAuth flow
+    await handleConnect(providerId);
+  } catch (err) {
+    showToast(`Failed to save credentials: ${err.message}`, 'error');
+  }
+}
+
+// ─── Refresh (scan sources) ──────────────────────────────────────────────
+let _scanInFlight = false;
+
+async function handleRefresh({ silent = false } = {}) {
+  if (_scanInFlight) return false;
+  _scanInFlight = true;
+
   const refreshBtn = document.getElementById('refreshBtn');
   const loadingEl = document.getElementById('sourcesLoading');
   const panel = document.getElementById('sourcesPanel');
 
-  refreshBtn.disabled = true;
-  refreshBtn.textContent = '⟳ Scanning…';
+  if (!silent) {
+    refreshBtn.disabled = true;
+    refreshBtn.textContent = '⟳ Scanning…';
+  }
   loadingEl.classList.remove('hidden');
   panel.classList.remove('collapsed');
 
-  // Expand the sources panel if it was collapsed
   const sourcesHeader = document.querySelector('[data-target="sourcesPanel"] .collapse-toggle');
   if (sourcesHeader) sourcesHeader.classList.add('open');
 
   try {
-    // Keys saved server-side are used automatically — no need to send them
-    // from the frontend. Only send keys if the user just entered them via
-    // handleSaveApiKey (that function calls handleRefresh with the new key).
     const data = await api('/sources/scan', { method: 'POST', body: '{}' });
     state.sources = data;
     render();
-    showToast('Scan complete', 'success');
+    // Reload tasks so newly ingested/classified source items appear immediately.
+    await loadTasks();
+    if (!silent) {
+      const ai = data.aiConfigured ? ' · AI ready' : '';
+      const enqueued = data.ingestion?.enqueue?.enqueued;
+      const enqueueMsg = Number.isFinite(enqueued) && enqueued > 0 ? ` (${enqueued} to classify)` : '';
+      showToast(`Scan complete${ai}${enqueueMsg}`, 'success');
+    }
+    return true;
   } catch (err) {
-    showToast(`Scan error: ${err.message}`, 'error');
+    if (!silent) showToast(`Scan error: ${err.message}`, 'error');
+    return false;
   } finally {
-    refreshBtn.disabled = false;
-    refreshBtn.textContent = '⟳ Refresh';
+    _scanInFlight = false;
+    if (!silent) {
+      refreshBtn.disabled = false;
+      refreshBtn.textContent = '⟳ Refresh';
+    }
     loadingEl.classList.add('hidden');
   }
 }
 
-// --- New Task Modal ---
+// ─── Focus-aware auto-scan ───────────────────────────────────────────────
+// Policy: scan every 5 minutes only while the app window is focused and the
+// page is visible. When unfocused/hidden nothing is scheduled. When the app is
+// refocused, run a single scan immediately (debounced against focus flicker).
+const AUTO_SCAN_MS = 5 * 60 * 1000;
+const AUTO_SCAN_DEBOUNCE_MS = 5 * 1000;
+let _autoScanTimer = null;
+let _lastAutoScanAt = 0;
+
+function appIsActive() {
+  return document.visibilityState === 'visible' && document.hasFocus();
+}
+
+function stopAutoScan() {
+  if (_autoScanTimer) {
+    clearTimeout(_autoScanTimer);
+    _autoScanTimer = null;
+  }
+}
+
+function scheduleNextAutoScan() {
+  stopAutoScan();
+  _autoScanTimer = setTimeout(() => {
+    _autoScanTimer = null;
+    if (appIsActive()) {
+      void maybeAutoScan();
+    }
+    // If the app went inactive, do nothing: the focus/visibility listener
+    // re-arms (and scans once) when the user comes back.
+  }, AUTO_SCAN_MS);
+}
+
+async function maybeAutoScan() {
+  const now = Date.now();
+  if (now - _lastAutoScanAt < AUTO_SCAN_DEBOUNCE_MS) {
+    // Focus flicker (e.g. Cmd+Tab round-trip) — skip, keep cadence.
+    scheduleNextAutoScan();
+    return;
+  }
+  if (!appIsActive()) return;
+  _lastAutoScanAt = now;
+  try {
+    await handleRefresh({ silent: true });
+  } finally {
+    scheduleNextAutoScan();
+  }
+}
+
+function handleAppFocusChange() {
+  if (appIsActive()) {
+    // Just became active/focused → scan once, then resume the 5-min cadence.
+    void maybeAutoScan();
+  } else {
+    // Went background/unfocused → stop any pending scan.
+    stopAutoScan();
+  }
+}
+
+function initAutoScan() {
+  window.addEventListener('focus', handleAppFocusChange);
+  window.addEventListener('blur', handleAppFocusChange);
+  document.addEventListener('visibilitychange', handleAppFocusChange);
+  // On first load, just arm the cadence (the explicit Refresh button and any
+  // focus change already cover an immediate first scan).
+  scheduleNextAutoScan();
+}
+
+// ─── New Task Modal ──────────────────────────────────────────────────────
 function showNewTaskModal() {
   const modal = document.getElementById('newTaskModal');
   modal.classList.remove('hidden');
@@ -622,7 +1045,7 @@ async function handleNewTaskSubmit(e) {
   }
 }
 
-// --- Import ---
+// ─── Import ──────────────────────────────────────────────────────────────
 async function handleImport() {
   try {
     const legacyData = localStorage.getItem('task-juggler:tasks:v1');
@@ -643,7 +1066,7 @@ async function handleImport() {
   }
 }
 
-// --- Toast ---
+// ─── Toast ───────────────────────────────────────────────────────────────
 function showToast(message, type = 'info') {
   let toast = document.getElementById('toast');
   if (!toast) {
@@ -659,16 +1082,17 @@ function showToast(message, type = 'info') {
   }, 3000);
 }
 
-// --- Init ---
+// ─── Init ────────────────────────────────────────────────────────────────
 async function init() {
   try {
-    await loadApiKeys();
+    await loadConnections();
     await loadTasks();
   } catch (err) {
     document.getElementById('activeList').innerHTML =
       `<div class="empty-state">Could not connect to server (http://localhost:3000).<br>Make sure the server is running.</div>`;
   }
   setupEventListeners();
+  initAutoScan();
 }
 
 init();

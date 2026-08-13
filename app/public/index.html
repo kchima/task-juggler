@@ -11,23 +11,25 @@
   <header>
     <h1>Task Juggler</h1>
     <div class="header-actions">
-      <button id="refreshBtn" class="btn primary" title="Scan Slack, Linear, Todoist, and Devin for new tasks">⟳ Refresh</button>
+      <button id="refreshBtn" class="btn primary" title="Scan connected sources for new tasks">⟳ Refresh</button>
       <button id="newTaskBtn" class="btn secondary">+ New Task</button>
       <button id="importBtn" class="btn secondary">Import Legacy</button>
       <span id="taskCount" class="count-badge"></span>
     </div>
   </header>
 
-  <!-- Sources panel — collapsed by default -->
+  <!-- Sources panel — shows connection statuses and allows scanning -->
   <section id="sourcesSection" class="sources-section">
     <h2 class="section-title collapsible" data-target="sourcesPanel">
       <span class="collapse-toggle">▶</span>
-      <span>Sources</span>
+      <span>Connections</span>
       <span id="sourcesSummary" class="count-pill"></span>
     </h2>
     <div id="sourcesPanel" class="sources-panel collapsed">
-      <div id="sourcesLoading" class="sources-loading hidden">Scanning sources…</div>
-      <div id="sourcesContent" class="sources-content"></div>
+      <div id="sourcesLoading" class="sources-loading hidden">
+        <span class="spinner"></span> Scanning…
+      </div>
+      <div id="sourcesContent"></div>
     </div>
   </section>
 

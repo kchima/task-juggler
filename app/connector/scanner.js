@@ -11,6 +11,9 @@ import {
   scanLinearDirect, scanTodoistDirect, scanSlackDirect, scanDevinDirect,
   getDirectAdaptersConfig,
 } from './directAdapters.js';
+import { getCredential } from '../auth/credentialStore.js';
+import { scanLocalSessions } from './localSessions.js';
+import { openCodeItems } from './openCodeSessions.js';
 
 // --- MCP client discovery -------------------------------------------------
 
@@ -63,13 +66,15 @@ async function scanSlackViaMcp(mcpClient) {
 
 async function scanLinearViaMcp(mcpClient) {
   const result = emptyScanResult('linear');
-  if (!mcpClient.hasTool('linear_list_issues')) {
+  const hasListIssues = mcpClient.hasTool('list_issues') || mcpClient.hasTool('linear_list_issues');
+  const toolName = mcpClient.hasTool('list_issues') ? 'list_issues' : 'linear_list_issues';
+  if (!hasListIssues) {
     result.status = 'unconfigured';
-    result.errors.push('linear_list_issues tool not available');
+    result.errors.push('list_issues tool not available');
     return result;
   }
   try {
-    const issuesResult = await mcpClient.callTool('linear_list_issues', { assignee: 'me' });
+    const issuesResult = await mcpClient.callTool(toolName, { assignee: 'me' });
     const raw = extractTextContent(issuesResult);
     const issues = safeJsonParse(raw)?.issues || [];
     for (const issue of issues) {
@@ -152,34 +157,67 @@ export async function scanAllSources(mcpClient = null, envConfig = {}) {
 
   const results = {};
 
-  // --- Slack ---
+  // --- Slack: MCP → direct token → MCP OAuth scan → unconfigured
   if (mcpClient && mcpClient.hasTool('slack_search')) {
     results.slack = await tryMcpDiscovery('slack', mcpClient);
   } else if (direct.slack) {
     results.slack = await scanSlackDirect(direct.slack);
   } else {
-    results.slack = scanResultUnconfigured('slack');
-    results.slack.errors.push('No Slack MCP server or SLACK_BOT_TOKEN configured. To enable: (a) connect a Slack MCP server, or (b) set the SLACK_BOT_TOKEN environment variable.');
+    // Try MCP OAuth scanning first (uses MCP tools via OAuth token)
+    const mcpOAuthResult = await tryMcpOAuthScan('slack');
+    if (mcpOAuthResult) {
+      results.slack = mcpOAuthResult;
+    } else if (hasAnyGrant('slack')) {
+      results.slack = scanResultWithError('slack', 'Slack is connected, but the last scan failed. The access token may be expired — reconnect from the Connections panel.');
+    } else {
+      results.slack = scanResultUnconfigured('slack');
+      results.slack.errors.push('No Slack connection configured. Enable Slack from the Connections panel.');
+    }
   }
 
-  // --- Linear ---
-  if (mcpClient && mcpClient.hasTool('linear_list_issues')) {
+  // --- Linear: MCP → direct token → MCP OAuth scan → unconfigured
+  if (mcpClient && (mcpClient.hasTool('list_issues') || mcpClient.hasTool('linear_list_issues'))) {
     results.linear = await tryMcpDiscovery('linear', mcpClient);
   } else if (direct.linear) {
     results.linear = await scanLinearDirect(direct.linear);
   } else {
-    results.linear = scanResultUnconfigured('linear');
-    results.linear.errors.push('No Linear MCP server or LINEAR_API_KEY configured. To enable: (a) connect a Linear MCP server, or (b) set the LINEAR_API_KEY environment variable (a personal API key from https://linear.app/settings/api).');
+    // Try MCP OAuth scanning via the MCP endpoint
+    const mcpOAuthResult = await tryMcpOAuthScan('linear');
+    if (mcpOAuthResult) {
+      results.linear = mcpOAuthResult;
+    } else if (hasAnyGrant('linear')) {
+      // A connection exists (OAuth grant) but scanning failed — surface as an
+      // error rather than misleading "not configured".
+      results.linear = scanResultWithError('linear', 'Linear is connected, but the last scan failed. The access token may be expired — reconnect from the Connections panel.');
+    } else {
+      results.linear = scanResultUnconfigured('linear');
+      results.linear.errors.push('No Linear connection configured. Enable Linear from the Connections panel.');
+    }
   }
 
-  // --- Todoist ---
+  // --- Todoist: MCP → direct token → MCP OAuth scan → legacy OAuth → unconfigured
   if (mcpClient && mcpClient.hasTool('todoist_find_tasks')) {
     results.todoist = await tryMcpDiscovery('todoist', mcpClient);
   } else if (direct.todoist) {
     results.todoist = await scanTodoistDirect(direct.todoist);
   } else {
-    results.todoist = scanResultUnconfigured('todoist');
-    results.todoist.errors.push('No Todoist MCP server or TODOIST_API_TOKEN configured. To enable: (a) connect a Todoist MCP server, or (b) set the TODOIST_API_TOKEN environment variable (get it from Todoist settings → Integrations → API token).');
+    // Try MCP OAuth scanning first
+    const mcpOAuthResult = await tryMcpOAuthScan('todoist');
+    if (mcpOAuthResult) {
+      results.todoist = mcpOAuthResult;
+    } else {
+      // Fall back to legacy direct OAuth
+      let todoistToken = null;
+      try { todoistToken = await resolveOAuthToken('todoist'); } catch { todoistToken = null; }
+      if (todoistToken) {
+        results.todoist = await scanTodoistDirect(todoistToken);
+      } else if (hasAnyGrant('todoist')) {
+        results.todoist = scanResultWithError('todoist', 'Todoist is connected, but the last scan failed. The access token may be expired — reconnect from the Connections panel.');
+      } else {
+        results.todoist = scanResultUnconfigured('todoist');
+        results.todoist.errors.push('No Todoist connection configured. Enable Todoist from the Connections panel (supports browser OAuth).');
+      }
+    }
   }
 
   // --- Devin ---
@@ -190,9 +228,44 @@ export async function scanAllSources(mcpClient = null, envConfig = {}) {
     results.devin.errors.push('DEVIN_API_TOKEN not configured. To enable: set the DEVIN_API_TOKEN environment variable (get a token from https://app.devin.ai/settings/api).');
   }
 
-  // --- Claude (always info-only — blocked at bridge layer) ---
-  results.claude = scanResultUnconfigured('claude');
-  results.claude.errors.push('Claude/Cowork session scanning is blocked at the artifact bridge layer. Use the juggler skill in chat to scan sessions.');
+  // --- Claude (local session discovery — read-only metadata) ---
+  try {
+    const { sessions, stats } = scanLocalSessions();
+    const result = emptyScanResult('claude');
+    result.status = sessions.length > 0 ? 'ok' : 'ok';
+    result.items = sessions.slice(0, 50).map((s) => ({
+      key: `claude:${s.id}`,
+      label: `${s.title}${s.cwd ? ` (${pathShortName(s.cwd)})` : ''}${s.status === 'in_progress' ? ' ●' : ''}`,
+      url: null,
+      status: s.status,
+    }));
+    result.detected = result.items.map((i) => ({ key: i.key, label: i.label, outcome: 'discovered' }));
+    if (stats.total > 0) {
+      result.errors = []; // Clear any previous errors
+    }
+    results.claude = result;
+  } catch (err) {
+    const result = scanResultWithError('claude', `Local discovery failed: ${err.message}`);
+    results.claude = result;
+  }
+
+  // --- OpenCode (local session/todo discovery — read-only metadata) ---
+  try {
+    const oc = openCodeItems();
+    const result = emptyScanResult('opencode');
+    if (oc.error) {
+      result.status = 'unconfigured';
+      result.errors.push(`OpenCode: ${oc.error}`);
+    } else {
+      result.status = oc.items.length > 0 ? 'ok' : 'ok';
+      result.items = oc.items.slice(0, 50);
+      result.detected = oc.sessions.map((s) => ({ key: s.key, label: s.title, outcome: 'discovered' }));
+    }
+    results.opencode = result;
+  } catch (err) {
+    const result = scanResultWithError('opencode', `OpenCode discovery failed: ${err.message}`);
+    results.opencode = result;
+  }
 
   return results;
 }
@@ -202,7 +275,113 @@ export function checkMcpCapabilities(mcpClient) {
   const tools = mcpClient.toolNames();
   const supportedSources = [];
   if (tools.includes('slack_search') && tools.includes('slack_read_thread')) supportedSources.push('slack');
-  if (tools.includes('linear_list_issues')) supportedSources.push('linear');
+  if (tools.includes('list_issues') || tools.includes('linear_list_issues')) supportedSources.push('linear');
   if (tools.includes('todoist_find_tasks')) supportedSources.push('todoist');
   return { connected: true, tools, supportedSources };
+}
+
+// --- OAuth token resolution ------------------------------------------------
+
+/**
+ * True if the provider has any stored grant (MCP OAuth or legacy OAuth) in
+ * Keychain — used to distinguish "connected but scan failed" from "not set up".
+ */
+function hasAnyGrant(sourceId) {
+  try {
+    if (getCredential(`${sourceId}-mcp-grant`)) return true;
+    if (getCredential(`${sourceId}-oauth-grant`)) return true;
+  } catch {}
+  return false;
+}
+
+/**
+ * Resolve an OAuth access token for a provider from Keychain.
+ * Handles automatic refresh when the token is expired.
+ */
+async function resolveOAuthToken(providerId) {
+  const grantService = `${providerId}-oauth-grant`;
+  const oauthGrant = getCredential(grantService);
+  if (!oauthGrant || !oauthGrant.accessToken) return null;
+
+  // Check if expired
+  if (oauthGrant.expiresIn) {
+    const expiresAt = oauthGrant.obtainedAt + (oauthGrant.expiresIn * 1000);
+    if (Date.now() >= expiresAt) {
+      if (!oauthGrant.refreshToken) return null; // Expired and no refresh — re-authorize needed
+      // Try refresh
+      try {
+        const { refreshAccessToken } = await import('../auth/oauthManager.js');
+        const refreshed = await refreshAccessToken(providerId);
+        if (refreshed && refreshed.accessToken) {
+          return refreshed.accessToken;
+        }
+      } catch {
+        // Refresh failed
+      }
+      return null;
+    }
+  }
+
+  return oauthGrant.accessToken;
+}
+
+// --- Helpers ----------------------------------------------------------------
+
+function pathShortName(p) {
+  if (!p) return '';
+  const parts = p.replace(/\/$/, '').split('/');
+  if (parts.length >= 2) return parts.slice(-2).join('/');
+  return parts.pop() || p;
+}
+
+/**
+ * Try to scan a provider using its MCP OAuth token directly.
+ * Fetches the MCP tools list, and if the required tools are available,
+ * creates a lightweight MCP client and runs the MCP-based scan.
+ */
+async function tryMcpOAuthScan(sourceId) {
+  try {
+    const grant = getCredential(`${sourceId}-mcp-grant`);
+    if (!grant || !grant.accessToken || !grant.mcpUrl) {
+      console.log(`[Scanner] No MCP OAuth grant for ${sourceId}`);
+      return null;
+    }
+
+    console.log(`[Scanner] Trying MCP OAuth scan for ${sourceId} at ${grant.mcpUrl}`);
+
+    // Call the MCP tools/list endpoint to check capabilities
+    const { callMcpToolsList } = await import('./mcpOAuthClient.js');
+    const tools = await callMcpToolsList(grant.mcpUrl, grant.accessToken);
+    console.log(`[Scanner] MCP tools/list returned ${tools.length} tools for ${sourceId}`);
+
+    // Build a minimal MCP client from the tools
+    const toolNames = tools.map((t) => t.name);
+
+    // Build a simple MCP client-wrapper
+    const { callMcpTool } = await import('./mcpOAuthClient.js');
+    const mcpClient = {
+      hasTool: (name) => toolNames.includes(name),
+      toolNames: () => toolNames,
+      callTool: async (name, args) => {
+        return callMcpTool(grant.mcpUrl, grant.accessToken, name, args);
+      },
+    };
+
+    return await tryMcpDiscovery(sourceId, mcpClient);
+  } catch (err) {
+    console.log(`[Scanner] MCP OAuth scan failed for ${sourceId}: ${err.message}`);
+    return null; // Fall through to unconfigured
+  }
+}
+
+/**
+ * Resolve an MCP OAuth token from Keychain.
+ * The MCP OAuth grant stores the access token under `<providerId>-mcp-grant`.
+ */
+function resolveMcpToken(providerId) {
+  try {
+    const grant = getCredential(`${providerId}-mcp-grant`);
+    if (grant && grant.accessToken) return grant.accessToken;
+  } catch {}
+  return null;
 }

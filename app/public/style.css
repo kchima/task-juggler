@@ -57,6 +57,19 @@ header h1 { font-size: 1.4rem; font-weight: 600; }
 .btn.danger:hover { background: var(--danger); color: #fff; border-color: var(--danger); }
 .btn.small { padding: 3px 10px; font-size: 0.8rem; }
 .btn.secondary { background: transparent; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn:disabled:hover { background: var(--surface); }
+
+/* Spinner */
+.spinner {
+  display: inline-block;
+  width: 12px; height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 
 /* Batch toolbar */
 .batch-toolbar {
@@ -193,63 +206,123 @@ header h1 { font-size: 1.4rem; font-weight: 600; }
 /* Source link indicator */
 .source-icon { font-size: 0.75rem; vertical-align: middle; margin-left: 2px; opacity: 0.6; }
 
-/* Sources panel */
+/* Sources / Connections panel */
 .sources-section { margin-bottom: 12px; }
 .sources-panel {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 12px; margin-bottom: 8px;
 }
 .sources-panel.collapsed { display: none; }
-.sources-loading { text-align: center; color: var(--text-muted); padding: 12px; font-size: 0.85rem; }
+.sources-loading {
+  display: flex; align-items: center; gap: 8px;
+  color: var(--text-muted); padding: 12px; font-size: 0.85rem;
+}
 .sources-loading.hidden { display: none; }
 
 .source-entry {
-  display: flex; align-items: flex-start; gap: 10px;
-  padding: 8px 0; border-bottom: 1px solid var(--border);
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 10px 0; border-bottom: 1px solid var(--border);
 }
 .source-entry:last-child { border-bottom: none; }
 
 .source-icon-label {
   display: flex; align-items: center; gap: 6px;
-  min-width: 100px; font-size: 0.85rem; font-weight: 500;
+  min-width: 80px; font-size: 0.85rem; font-weight: 500;
 }
 
-.source-status {
-  font-size: 0.75rem; padding: 1px 6px; border-radius: 3px;
-  text-transform: uppercase;
+.source-icon-label .source-icon {
+  font-size: 1.1rem;
+  width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
-.source-status.ok { background: rgba(63,185,80,0.15); color: var(--success); }
-.source-status.error,
-.source-status.unconfigured,
-.source-status.not-available { background: rgba(229,83,75,0.15); color: var(--danger); }
+
+.source-name {
+  font-size: 0.88rem;
+}
 
 .source-items { flex: 1; min-width: 0; }
-.source-items .source-item {
-  font-size: 0.8rem; padding: 2px 0; color: var(--text-muted);
-  display: flex; align-items: center; gap: 4px;
-}
-.source-items .source-item .item-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.source-items .source-item .item-outcome {
-  font-size: 0.7rem; padding: 0 4px; border-radius: 2px;
-  flex-shrink: 0;
-}
-.source-items .source-item .item-outcome.pending { color: var(--warning); }
-.source-items .source-item .item-outcome.added { color: var(--success); }
-.source-items .source-item .item-outcome.skipped-gate { color: var(--text-muted); }
 
-.source-errors { margin-top: 4px; }
-.source-error {
-  font-size: 0.75rem; color: var(--danger); padding: 2px 0;
-  word-break: break-word;
+/* Connection status area */
+.conn-status {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin-bottom: 4px;
 }
 
-.source-empty {
-  font-size: 0.8rem; color: var(--text-muted); padding: 4px 0;
+.conn-badge {
+  font-size: 0.72rem; padding: 1px 8px; border-radius: 3px;
+  font-weight: 500;
+}
+.conn-badge.connected {
+  background: rgba(63,185,80,0.15); color: var(--success);
 }
 
-.sources-refresh-note {
-  font-size: 0.75rem; color: var(--text-muted); text-align: center;
-  padding-top: 8px; margin-top: 8px; border-top: 1px solid var(--border);
+.conn-account {
+  font-size: 0.82rem; color: var(--text); font-weight: 500;
+}
+
+.conn-scope {
+  font-size: 0.7rem; color: var(--text-muted);
+  background: var(--bg); padding: 1px 6px; border-radius: 3px;
+}
+
+.conn-pending {
+  font-size: 0.8rem; color: var(--text-muted);
+}
+
+.conn-unavailable {
+  font-size: 0.75rem; color: var(--text-muted);
+  font-style: italic;
+}
+
+.conn-disconnect {
+  color: var(--danger);
+  font-size: 0.72rem;
+}
+.conn-disconnect:hover { background: var(--danger); color: #fff; }
+
+.conn-connect {
+  font-size: 0.78rem;
+}
+
+/* API token config (non-OAuth sources) */
+.conn-token-config {
+  margin-top: 6px; padding: 8px;
+  background: var(--bg); border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+.conn-token-config.hidden { display: none; }
+
+.conn-token-input {
+  width: 100%; padding: 6px 8px; margin-bottom: 6px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 3px; color: var(--text); font-size: 0.8rem; font-family: monospace;
+}
+.conn-token-input:focus { outline: none; border-color: var(--primary); }
+
+.conn-token-save {
+  font-size: 0.72rem;
+}
+
+/* Scan items */
+.scan-items {
+  margin-top: 4px;
+}
+.scan-item {
+  font-size: 0.75rem; color: var(--text-muted);
+  padding: 1px 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.scan-item-more {
+  font-size: 0.7rem; color: var(--primary); cursor: default;
+  padding: 1px 0;
+}
+
+.scan-errors { margin-top: 4px; }
+.scan-error {
+  font-size: 0.72rem; color: var(--danger);
+  padding: 1px 0; word-break: break-word;
 }
 
 /* Toast notifications */
@@ -271,4 +344,6 @@ header h1 { font-size: 1.4rem; font-weight: 600; }
   .header-actions { width: 100%; }
   .header-actions .btn { flex: 1; justify-content: center; }
   .task-card .task-actions { opacity: 1; }
+  .source-entry { flex-direction: column; }
+  .source-icon-label { min-width: auto; }
 }
