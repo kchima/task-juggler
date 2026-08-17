@@ -18,6 +18,7 @@ import { scanAllSources, checkMcpCapabilities } from './connector/scanner.js';
 import { ingestAndQueue } from './ingestService.js';
 import { processNextJobs, enqueueDueJobs, markUserFields } from './ai/classification.js';
 import { getAiConfig, isAiConfigured } from './ai/openRouterClient.js';
+import { tick as drainScheduler, startScheduler } from './scheduler.js';
 import { McpClient } from './connector/mcpClient.js';
 import { FakeMcpServer } from './connector/fakeMcpServer.js';
 import {
@@ -617,6 +618,11 @@ app.post('/api/sources/scan', async (req, res) => {
   // is the sole writer of source state from a scan.
   const aiConfig = getAiConfig();
   const ingestion = await ingestAndQueue(results);
+
+  // Drain a bounded classification batch right after fetching (non-blocking, so
+  // the scan response stays fast). The recurring scheduler handles steady state.
+  void drainScheduler().catch(() => {});
+
   res.json({ results, ingestion, aiConfigured: isAiConfigured(aiConfig) });
 });
 
@@ -676,7 +682,10 @@ export function startServer(port = PORT) {
 // Allow direct run
 const isMain = process.argv[1] && (process.argv[1] === fileURLToPath(import.meta.url) || process.argv[1].endsWith('/app/server.js'));
 if (isMain) {
-  startServer(PORT);
+  startServer(PORT).then(() => {
+    // Start the recurring OpenRouter classifier (safe no-op if not configured).
+    startScheduler();
+  });
 }
 
 export { app };

@@ -601,3 +601,16 @@ export function getJobStates() {
   return conn.prepare('SELECT state, COUNT(*) AS count FROM classification_jobs GROUP BY state').all()
     .reduce((acc, row) => { acc[row.state] = row.count; return acc; }, {});
 }
+
+/**
+ * Sum the OpenRouter cost recorded for jobs completed today (UTC), used to
+ * enforce the daily budget guardrail in the classification scheduler.
+ * `updated_at` is set to `datetime('now')` (UTC) on completion.
+ */
+export function getTodayCompletedCostUsd() {
+  const conn = getDb();
+  const r = conn.prepare(
+    "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM classification_jobs WHERE state = 'succeeded' AND updated_at >= date('now')",
+  ).get();
+  return r && typeof r.total === 'number' ? r.total : 0;
+}
