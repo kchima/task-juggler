@@ -1,4 +1,5 @@
 // Task Juggler - Local-First Frontend Application
+import { prioritize } from './scoring.js';
 
 const API_BASE = '/api';
 
@@ -13,6 +14,9 @@ const PROVIDERS = {
     color: '#4a154b',
     supportsOAuth: true,
     isMcpOAuth: true,
+    supportsToken: true,
+    tokenLabel: 'Slack token — xoxb- (bot) or xoxp- (user)',
+    tokenHint: 'xoxb-… / xoxp-…',
     description: 'Messages, threads, and files',
   },
   linear: {
@@ -132,6 +136,21 @@ async function loadConnections() {
         // Provider may not exist or setup route not available
       }
     }
+
+    // Token-configured sources (Slack/Devin via Keychain) — show a configured badge
+    try {
+      const keys = await api('/sources/keys');
+      for (const [sid, info] of Object.entries(keys.keys || {})) {
+        if (info.configured) {
+          state.connections[sid] = {
+            ...(state.connections[sid] || { connected: false, providerId: sid }),
+            tokenConfigured: true,
+          };
+        }
+      }
+    } catch {
+      // Endpoint unavailable during startup
+    }
   } catch {
     state.connections = {};
   }
@@ -244,23 +263,10 @@ async function handleDisconnect(providerId) {
 }
 
 // ─── UI helpers ───────────────────────────────────────────────────────────
-function prioritize(tasks) {
-  const score = (t) => {
-    let s = 0;
-    if (t.ballInUsersCourt) s += 100;
-    if (t.status === 'in_progress') s += 80;
-    if (t.priority === 'urgent') s += 40;
-    if (t.priority === 'high') s += 20;
-    if (t.dueDate) {
-      const days = (new Date(t.dueDate) - new Date()) / (1000*60*60*24);
-      if (days <= 0) s += 50;
-      else if (days <= 2) s += 30;
-      else if (days <= 7) s += 10;
-    }
-    return s;
-  };
-  return [...tasks].sort((a, b) => score(b) - score(a));
-}
+// Ordering lives in scoring.js (the finishing-bias rules the product is built
+// on): tier first (active work above blocked), then score. A not_started task
+// the user is responsible for belongs in the top Active list, not the collapsed
+// Not Started section.
 
 function partitionTasks() {
   const active = [];
@@ -270,7 +276,7 @@ function partitionTasks() {
   function walk(node) {
     if (node.status === 'completed') {
       completed.push(node);
-    } else if (node.status === 'not_started') {
+    } else if (node.status === 'not_started' && !node.ballInUsersCourt) {
       notStarted.push(node);
     } else {
       active.push(node);
@@ -347,8 +353,10 @@ function renderSourceEntry(provider, conn, scanResult) {
   let actionHtml = '';
   if (provider.isMcpOAuth) {
     if (provider.id === 'slack') {
-      // Slack needs a setup guide + credential entry before Connect with browser
+      // Slack is token-first: paste a bot/user token (common, no app setup).
+      // OAuth remains available as an advanced option requiring a Slack app.
       const hasClientCreds = conn && conn.appConfigured;
+      const tokenConfigured = conn && conn.tokenConfigured;
       if (isConnected) {
         const scopeLabel = conn.scope ? conn.scope.split(' ').slice(0, 2).join(', ') : '';
         actionHtml = `
@@ -366,49 +374,48 @@ function renderSourceEntry(provider, conn, scanResult) {
             <span class="conn-pending">Waiting for browser authorization…</span>
           </div>
         `;
-      } else if (!hasClientCreds) {
-        actionHtml = `
-          <div class="conn-status">
-            <span class="conn-unavailable">Deferred — requires a registered Slack app</span>
-          </div>
-          <div class="slack-advanced">
-            <button class="btn small conn-setup" data-setup="${provider.id}">
-              Advanced: configure your own Slack app
-            </button>
-            <div class="slack-warning">
-              Use your own Slack app credentials only. Do not paste third-party
-              or partner client IDs/secrets. Task Juggler's hosted Slack integration
-              is not available yet.
-            </div>
-          </div>
-          <div class="conn-setup-config hidden" data-setup-config="${provider.id}">
-            <div class="setup-guide">
-              <p><strong>To connect Slack with your own app, first create one:</strong></p>
-              <ol>
-                <li>Go to <a href="https://api.slack.com/apps" target="_blank">api.slack.com/apps</a></li>
-                <li>Click <strong>Create New App → From scratch</strong></li>
-                <li>Go to <strong>OAuth & Permissions</strong> → enable <strong>PKCE</strong> (one-way)</li>
-                <li>Add <strong>Redirect URL</strong>: <code>http://localhost:3000/api/auth/mcp-callback/slack</code></li>
-                <li>Add <strong>User Token Scopes</strong>:<br>
-                  <code>search:read.public, search:read.private, channels:history,<br>
-                  groups:history, mpim:history, im:history, users:read,<br>
-                  channels:read, files:read, emoji:read, reactions:read</code></li>
-                <li>Go to <strong>Basic Information</strong> and copy <strong>Client ID</strong> and <strong>Client Secret</strong></li>
-              </ol>
-            </div>
-            <div class="setup-form">
-              <input type="text" class="conn-client-input" data-client-input="${provider.id}" placeholder="Client ID (e.g. 12345.67890)">
-              <input type="password" class="conn-secret-input" data-secret-input="${provider.id}" placeholder="Client Secret">
-              <button class="btn small primary conn-client-save" data-client-save="${provider.id}">Save & Connect</button>
-            </div>
-          </div>
-        `;
       } else {
         actionHtml = `
           <div class="conn-status">
-            <button class="btn small primary conn-connect" data-connect="${provider.id}">
-              Connect with browser
+            <button class="btn small conn-token-toggle" data-token-toggle="${provider.id}">Add Slack token</button>
+            ${tokenConfigured ? `<span class="conn-badge connected">Token configured</span>` : ''}
+          </div>
+          <div class="conn-token-config hidden" data-token-config="${provider.id}">
+            <input type="password" class="conn-token-input" data-token-input="${provider.id}"
+                   placeholder="Slack token — xoxb- (bot) or xoxp- (user)">
+            <button class="btn small conn-token-save" data-token-save="${provider.id}">Save</button>
+          </div>
+          <div class="slack-advanced">
+            <button class="btn small conn-setup" data-setup="${provider.id}">
+              Advanced: OAuth (requires a Slack app)
             </button>
+            <div class="conn-setup-config hidden" data-setup-config="${provider.id}">
+              ${hasClientCreds ? `
+                <div class="conn-status">
+                  <button class="btn small primary conn-connect" data-connect="${provider.id}">Connect with browser</button>
+                </div>
+              ` : `
+                <div class="setup-guide">
+                  <p><strong>To connect Slack with your own app, first create one:</strong></p>
+                  <ol>
+                    <li>Go to <a href="https://api.slack.com/apps" target="_blank">api.slack.com/apps</a></li>
+                    <li>Click <strong>Create New App → From scratch</strong></li>
+                    <li>Go to <strong>OAuth & Permissions</strong> → enable <strong>PKCE</strong> (one-way)</li>
+                    <li>Add <strong>Redirect URL</strong>: <code>http://localhost:3000/api/auth/mcp-callback/slack</code></li>
+                    <li>Add <strong>User Token Scopes</strong>:<br>
+                      <code>search:read.public, search:read.private, channels:history,<br>
+                      groups:history, mpim:history, im:history, users:read,<br>
+                      channels:read, files:read, emoji:read, reactions:read</code></li>
+                    <li>Go to <strong>Basic Information</strong> and copy <strong>Client ID</strong> and <strong>Client Secret</strong></li>
+                  </ol>
+                </div>
+                <div class="setup-form">
+                  <input type="text" class="conn-client-input" data-client-input="${provider.id}" placeholder="Client ID (e.g. 12345.67890)">
+                  <input type="password" class="conn-secret-input" data-secret-input="${provider.id}" placeholder="Client Secret">
+                  <button class="btn small primary conn-client-save" data-client-save="${provider.id}">Save & Connect</button>
+                </div>
+              `}
+            </div>
           </div>
         `;
       }
@@ -642,7 +649,7 @@ function setupEventListeners() {
       const sid = tokenSave.dataset.tokenSave;
       const input = document.querySelector(`[data-token-input="${sid}"]`);
       if (input && input.value.trim()) {
-        handleSaveDevinToken(input.value.trim());
+        handleSaveSourceToken(sid, input.value.trim());
         input.value = '';
         const configEl = document.querySelector(`[data-token-config="${sid}"]`);
         if (configEl) configEl.classList.add('hidden');
@@ -853,12 +860,12 @@ async function handleCreateSubtask(parentId) {
   }
 }
 
-// ─── API token management (for Devin only) ──────────────────────────────
-async function handleSaveDevinToken(token) {
+// ─── API token management (Slack, Devin, … non-OAuth direct sources) ─────
+async function handleSaveSourceToken(sourceId, token) {
   try {
-    const body = { keys: { devin: token } };
+    const body = { keys: { [sourceId]: token } };
     await api('/sources/keys', { method: 'POST', body: JSON.stringify(body) });
-    showToast('Devin token saved', 'success');
+    showToast(`${PROVIDERS[sourceId]?.name || sourceId} token saved`, 'success');
     await handleRefresh();
   } catch (err) {
     showToast(`Failed to save token: ${err.message}`, 'error');

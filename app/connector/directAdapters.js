@@ -194,50 +194,94 @@ export async function scanTodoistDirect(apiToken) {
 
 // --- Adapter: Slack via Web API ---
 
+const SLACK_API = 'https://slack.com/api';
+
+/**
+ * Find recent threads involving the user and fetch each thread's full body so
+ * the classifier has real context. Works with either a bot token (xoxb-) or a
+ * user token (xoxp-); search coverage depends on the token's scopes.
+ */
 export async function scanSlackDirect(botToken) {
   const result = { sourceId: 'slack', status: 'ok', items: [], errors: [], detected: [] };
 
   if (!botToken) {
     result.status = 'unconfigured';
-    result.errors.push('SLACK_BOT_TOKEN not configured. Set the SLACK_BOT_TOKEN environment variable.');
+    result.errors.push('Slack token not configured. Add a Slack token (xoxb- or xoxp-) in the Connections panel.');
     return result;
   }
+  const auth = { Authorization: `Bearer ${botToken}` };
 
   try {
-    // Use conversations.list and search.messages to find thread mentions
-    const authResp = await fetchUrl('https://slack.com/api/auth.test', {
-      headers: { 'Authorization': `Bearer ${botToken}` },
-    });
-    const authData = JSON.parse(authResp.body);
-    if (!authData.ok) {
+    const authResp = await fetchUrl(`${SLACK_API}/auth.test`, { headers: auth });
+    const authData = safeJsonParseBody(authResp);
+    if (!authData || !authData.ok) {
       result.status = 'error';
-      result.errors.push(`Slack auth failed: ${authData.error}`);
+      result.errors.push(`Slack auth failed: ${authData?.error || `HTTP ${authResp.status}`}`);
       return result;
     }
 
-    // Search for recent thread activity
-    const searchResp = await postJson('https://slack.com/api/search.messages', {
-      query: 'is:thread after:yesterday',
-      count: 20,
-      sort: 'timestamp',
-    }, {
-      headers: { 'Authorization': `Bearer ${botToken}`, 'Content-Type': 'application/json' },
-    });
+    // Two simple queries (Slack search doesn't reliably support boolean OR):
+    // threads directed at the user, and threads the user started. Both use the
+    // same dedupe map below.
+    const queries = ['is:thread to:me after:yesterday', 'is:thread from:me after:yesterday'];
+    const byKey = new Map();
 
-    if (searchResp.status === 200) {
-      const searchData = JSON.parse(searchResp.body);
-      if (searchData.ok && searchData.messages?.matches) {
-        for (const match of searchData.messages.matches) {
-          if (match.permalink) {
-            const key = `slack:${match.channel?.id || '?'}:${match.ts}`;
-            result.items.push({
-              key,
-              label: match.text ? match.text.slice(0, 100) : `Thread in #${match.channel?.name || '?'}`,
-              url: match.permalink,
-            });
-            result.detected.push({ key, label: match.text?.slice(0, 80) || 'Thread', outcome: 'pending' });
+    for (const query of queries) {
+      try {
+        const searchResp = await postJson(`${SLACK_API}/search.messages`, { query, count: 20, sort: 'timestamp' }, {
+          headers: { ...auth, 'Content-Type': 'application/json' },
+        });
+        const searchData = safeJsonParseBody(searchResp);
+        if (searchData && searchData.ok && searchData.messages?.matches) {
+          for (const match of searchData.messages.matches) {
+            const channelId = match.channel?.id;
+            // For a thread reply, thread_ts is the root; otherwise the message ts.
+            const threadTs = match.thread_ts || match.ts;
+            if (!channelId || !threadTs) continue;
+            const key = `slack:${channelId}:${threadTs}`;
+            if (byKey.has(key)) continue;
+            byKey.set(key, { match, channelId, threadTs });
           }
+        } else if (searchData && !searchData.ok && searchData.error) {
+          result.errors.push(`Slack search ("${query}"): ${searchData.error}`);
         }
+      } catch (err) {
+        result.errors.push(`Slack search ("${query}"): ${err.message}`);
+      }
+    }
+
+    // Fetch the full thread for each candidate (bounded) so classification has
+    // real content. One failing thread never blocks the rest.
+    const candidates = [...byKey.values()].slice(0, 15);
+    for (const { match, channelId, threadTs } of candidates) {
+      try {
+        const repliesResp = await fetchUrl(
+          `${SLACK_API}/conversations.replies?channel=${encodeURIComponent(channelId)}&ts=${encodeURIComponent(threadTs)}&limit=50`,
+          { headers: auth },
+        );
+        const repliesData = safeJsonParseBody(repliesResp);
+        if (!repliesData || !repliesData.ok) {
+          result.errors.push(`Slack replies (${channelId}): ${repliesData?.error || `HTTP ${repliesResp.status}`}`);
+          continue;
+        }
+        const messages = repliesData.messages || [];
+        const text = messages.map((m) => {
+          const who = m.user ? `U${m.user}` : (m.bot_id ? `bot:${m.bot_id}` : '?');
+          return `[${who}] ${m.text || ''}`;
+        }).join('\n').trim();
+
+        result.items.push({
+          key: `slack:${channelId}:${threadTs}`,
+          label: (match.text || messages[0]?.text || `Thread in #${match.channel?.name || channelId}`).slice(0, 120),
+          url: match.permalink || null,
+          status: null,
+          priority: null,
+          raw: { channelId, threadTs, channelName: match.channel?.name || null, text },
+          updatedAt: match.ts ? new Date(Number(match.ts) * 1000).toISOString() : null,
+        });
+        result.detected.push({ key: `slack:${channelId}:${threadTs}`, label: text.slice(0, 80), outcome: 'pending' });
+      } catch (err) {
+        result.errors.push(`Slack replies (${channelId}): ${err.message}`);
       }
     }
   } catch (err) {
@@ -246,6 +290,11 @@ export async function scanSlackDirect(botToken) {
   }
 
   return result;
+}
+
+function safeJsonParseBody(resp) {
+  if (!resp || typeof resp.body !== 'string' || !resp.body) return null;
+  try { return JSON.parse(resp.body); } catch { return null; }
 }
 
 // --- Adapter: Devin via Public REST API ---

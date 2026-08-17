@@ -589,9 +589,31 @@ app.post('/api/auth/mcp-setup/:provider', (req, res) => {
 
 // --- Connector / Source scanning -------------------------------------------
 let _mcpClient = null;
-// In-memory API key storage for non-OAuth sources (Slack, Linear, Devin)
-// OAuth-managed providers (Todoist) use Keychain grants instead.
+// In-session cache for direct API tokens (non-OAuth sources). The durable copy
+// lives in the macOS Keychain (see resolveDirectKey), so tokens survive server
+// restarts and `run.sh` auto-updates — in-memory only would silently wipe them.
 let _apiKeys = {};
+
+const DIRECT_KEY_ENV = {
+  slack: 'SLACK_BOT_TOKEN',
+  linear: 'LINEAR_API_KEY',
+  todoist: 'TODOIST_API_TOKEN',
+  devin: 'DEVIN_API_TOKEN',
+};
+
+/**
+ * Resolve a direct API token in priority order: Keychain (persistent) → this
+ * session's memory → environment. Keychain is the durable store so a token
+ * entered in the browser survives restarts.
+ */
+function resolveDirectKey(sourceId) {
+  try {
+    const stored = getCredential(`${sourceId}-token`);
+    if (stored && stored.token) return stored.token;
+  } catch {}
+  if (_apiKeys[sourceId]) return _apiKeys[sourceId];
+  return process.env[DIRECT_KEY_ENV[sourceId]] || null;
+}
 
 function getOrCreateMcpClient() {
   return _mcpClient;
@@ -604,12 +626,12 @@ function getOrCreateMcpClient() {
  */
 app.post('/api/sources/scan', async (req, res) => {
   const mcpClient = getOrCreateMcpClient();
-  // Merge: in-memory keys > env vars (for non-OAuth sources)
+  // Direct tokens: Keychain (persistent) > in-session memory > env vars.
   const envConfig = {
-    linear: _apiKeys.linear || process.env.LINEAR_API_KEY || null,
+    linear: resolveDirectKey('linear'),
     todoist: null, // OAuth-managed — uses Keychain grant
-    slack: _apiKeys.slack || process.env.SLACK_BOT_TOKEN || null,
-    devin: _apiKeys.devin || process.env.DEVIN_API_TOKEN || null,
+    slack: resolveDirectKey('slack'),
+    devin: resolveDirectKey('devin'),
   };
   const results = await scanAllSources(mcpClient, envConfig);
 
@@ -626,29 +648,31 @@ app.post('/api/sources/scan', async (req, res) => {
   res.json({ results, ingestion, aiConfigured: isAiConfigured(aiConfig) });
 });
 
-// Store API keys for non-OAuth sources (Slack, Linear, Devin) — in-memory.
+// Store API keys for non-OAuth sources (Slack, Linear, Devin) — persisted to the
+// macOS Keychain as the durable store, with an in-memory cache for this process.
 app.post('/api/sources/keys', (req, res) => {
   const { keys } = req.body;
   if (!keys || typeof keys !== 'object') return res.status(400).json({ error: 'keys object required' });
   const stored = {};
   for (const [sourceId, value] of Object.entries(keys)) {
-    if (typeof value === 'string' && value.length > 4) {
-      _apiKeys[sourceId] = value;
-      stored[sourceId] = value.slice(0, 4) + '···' + value.slice(-4);
+    if (typeof value === 'string' && value.trim().length > 4) {
+      const token = value.trim();
+      _apiKeys[sourceId] = token;
+      storeCredential(`${sourceId}-token`, { token, storedAt: Date.now() });
+      stored[sourceId] = token.slice(0, 4) + '···' + token.slice(-4);
     }
   }
-  res.json({ ok: true, stored: Object.keys(stored) });
+  res.json({ ok: true, stored: Object.keys(stored), persisted: true });
 });
 
 // Get the stored API key status (which non-OAuth sources have keys, masked)
 app.get('/api/sources/keys', (_req, res) => {
   const status = {};
-  for (const [sourceId, value] of Object.entries(_apiKeys)) {
-    status[sourceId] = { configured: true, masked: value.slice(0, 4) + '···' + value.slice(-4) };
-  }
-  for (const key of ['linear', 'todoist', 'slack', 'devin']) {
-    if (!status[key] && process.env[`${key.toUpperCase()}_API_KEY`]) {
-      status[key] = { configured: true, source: 'env' };
+  for (const sourceId of Object.keys(DIRECT_KEY_ENV)) {
+    if (resolveDirectKey(sourceId)) {
+      status[sourceId] = { configured: true, source: 'keychain' };
+    } else if (process.env[DIRECT_KEY_ENV[sourceId]]) {
+      status[sourceId] = { configured: true, source: 'env' };
     }
   }
   res.json({ keys: status });

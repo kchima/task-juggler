@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { scoreTask, tierOf, sortTasks, completedTasks } from '../src/scoring.js';
+// Pointed at the LIVE app module (app/public/scoring.js) — the original
+// artifact module (src/scoring.js) is frozen legacy and never ships.
+import { scoreTask, tierOf, sortTasks, completedTasks, prioritize } from '../app/public/scoring.js';
 
 const NOW = new Date('2026-07-23T12:00:00Z');
 
@@ -25,6 +27,11 @@ describe('tierOf', () => {
   it('tiers waiting_other and waiting_ai as blocked (1)', () => {
     expect(tierOf(makeTask({ status: 'waiting_other' }))).toBe(1);
     expect(tierOf(makeTask({ status: 'waiting_ai' }))).toBe(1);
+  });
+
+  it('tiers the live waiting_for_* vocabulary as blocked (1)', () => {
+    expect(tierOf(makeTask({ status: 'waiting_for_other' }))).toBe(1);
+    expect(tierOf(makeTask({ status: 'waiting_for_ai' }))).toBe(1);
   });
 
   it('tiers completed as 2', () => {
@@ -85,6 +92,17 @@ describe('sortTasks — the finishing-bias acceptance case', () => {
   it('excludes completed tasks entirely', () => {
     const tasks = [makeTask({ id: 'a' }), makeTask({ id: 'b', status: 'completed' })];
     expect(sortTasks(tasks, NOW).map((t) => t.id)).toEqual(['a']);
+  });
+
+  // Real divergence from ARCHITECTURE.md §4.2: the old client-side prioritize()
+  // (since removed) gave an in-progress/urgent/overdue task score 170 and a
+  // small, ball-in-your-court, not-started task 100, inverting the product.
+  it('ranks a small ball-in-court not-started task above an in-progress urgent overdue task not in your court', () => {
+    const a = makeTask({ id: 'a', status: 'not_started', ballInUsersCourt: true, estRemaining: 'small' });
+    const b = makeTask({ id: 'b', status: 'in_progress', ballInUsersCourt: false, estRemaining: 'medium', sourcePriority: 'urgent', dueDate: '2026-07-20T00:00:00Z' });
+    expect(scoreTask(a, NOW)).toBe(130);
+    expect(scoreTask(b, NOW)).toBeLessThan(130);
+    expect(prioritize([b, a], NOW).map((t) => t.id)).toEqual(['a', 'b']);
   });
 });
 
