@@ -1,6 +1,6 @@
 // Tests for the source scanner
 import { describe, it, expect, beforeEach } from 'vitest';
-import { scanAllSources, checkMcpCapabilities } from '../../app/connector/scanner.js';
+import { scanAllSources, checkMcpCapabilities, isMcpGrantExpired } from '../../app/connector/scanner.js';
 import { getSource, getEnabledSources } from '../../app/connector/registry.js';
 import { FakeMcpServer, createSlackTestServer, createLinearTestServer, createTodoistTestServer } from '../../app/connector/fakeMcpServer.js';
 import { McpClient } from '../../app/connector/mcpClient.js';
@@ -129,5 +129,34 @@ describe('checkMcpCapabilities', () => {
     expect(status.supportedSources).toContain('slack');
     expect(status.supportedSources).toContain('linear');
     expect(status.supportedSources).toContain('todoist');
+  });
+});
+describe('isMcpGrantExpired', () => {
+  const NOW = new Date('2026-08-01T12:00:00Z');
+
+  it('never flags a grant without expiresIn', () => {
+    expect(isMcpGrantExpired({ accessToken: 'x' }, NOW)).toBe(false);
+    expect(isMcpGrantExpired(null, NOW)).toBe(false);
+  });
+
+  it('flags an access token past its expiry as expired', () => {
+    const grant = { expiresIn: 3600, obtainedAt: NOW.getTime() - 3600 * 1000 }; // expired 1s ago
+    expect(isMcpGrantExpired(grant, NOW)).toBe(true);
+  });
+
+  it('flags a token within the refresh buffer as nearly-expired so we refresh early', () => {
+    const grant = { expiresIn: 3600, obtainedAt: NOW.getTime() - (3600 - 30) * 1000 }; // 30s left
+    expect(isMcpGrantExpired(grant, NOW)).toBe(true);
+  });
+
+  it('does not flag a fresh token', () => {
+    const grant = { expiresIn: 3600, obtainedAt: NOW.getTime() - 60_000 }; // 59m left
+    expect(isMcpGrantExpired(grant, NOW)).toBe(false);
+  });
+
+  it('respects a custom buffer', () => {
+    const grant = { expiresIn: 3600, obtainedAt: NOW.getTime() - (3600 - 600) * 1000 }; // 10m left
+    expect(isMcpGrantExpired(grant, NOW, 60_000)).toBe(false);
+    expect(isMcpGrantExpired(grant, NOW, 15 * 60_000)).toBe(true);
   });
 });

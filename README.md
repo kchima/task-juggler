@@ -17,7 +17,9 @@ open the browser, connect sources, and paste API tokens to pull in work.
 
 Sources connect two ways: **OAuth via "Connect with browser"** (Linear, Todoist —
 zero-setup through their hosted MCP endpoints) or a **paste-an-API-token** (Slack,
-Devin). Tokens you paste are stored in your macOS Keychain and survive restarts.
+Devin). OAuth grants and pasted tokens are stored in your macOS Keychain and
+**auto-refresh in the background**, so you shouldn't need to reconnect until you
+disconnect the source yourself.
 
 AI classification is on by default once you set an OpenRouter key: it re-judges
 new/changed work every few minutes (within a daily budget) and surfaces what

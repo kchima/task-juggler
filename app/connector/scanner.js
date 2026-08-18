@@ -338,6 +338,11 @@ function pathShortName(p) {
  * Try to scan a provider using its MCP OAuth token directly.
  * Fetches the MCP tools list, and if the required tools are available,
  * creates a lightweight MCP client and runs the MCP-based scan.
+ *
+ * Keeps the connection alive: if the stored access token is expired (or near
+ * expiry), it is refreshed first via the rotating refresh token, so the user
+ * doesn't have to re-authorize. Only when refresh fails (or no refresh token
+ * exists) does it fall through to "reconnect required".
  */
 async function tryMcpOAuthScan(sourceId) {
   try {
@@ -347,11 +352,27 @@ async function tryMcpOAuthScan(sourceId) {
       return null;
     }
 
+    let accessToken = grant.accessToken;
+    if (isMcpGrantExpired(grant)) {
+      console.log(`[Scanner] MCP OAuth grant for ${sourceId} is expired — refreshing`);
+      if (!grant.refreshToken) {
+        console.log(`[Scanner] No refresh token for ${sourceId} — re-authorization required`);
+        return null;
+      }
+      const { refreshMcpToken } = await import('./mcpOAuthClient.js');
+      const fresh = await refreshMcpToken(sourceId);
+      if (!fresh || !fresh.accessToken) {
+        console.log(`[Scanner] Refresh failed for ${sourceId} — re-authorization required`);
+        return null;
+      }
+      accessToken = fresh.accessToken;
+    }
+
     console.log(`[Scanner] Trying MCP OAuth scan for ${sourceId} at ${grant.mcpUrl}`);
 
     // Call the MCP tools/list endpoint to check capabilities
     const { callMcpToolsList } = await import('./mcpOAuthClient.js');
-    const tools = await callMcpToolsList(grant.mcpUrl, grant.accessToken);
+    const tools = await callMcpToolsList(grant.mcpUrl, accessToken);
     console.log(`[Scanner] MCP tools/list returned ${tools.length} tools for ${sourceId}`);
 
     // Build a minimal MCP client from the tools
@@ -363,7 +384,7 @@ async function tryMcpOAuthScan(sourceId) {
       hasTool: (name) => toolNames.includes(name),
       toolNames: () => toolNames,
       callTool: async (name, args) => {
-        return callMcpTool(grant.mcpUrl, grant.accessToken, name, args);
+        return callMcpTool(grant.mcpUrl, accessToken, name, args);
       },
     };
 
@@ -372,6 +393,16 @@ async function tryMcpOAuthScan(sourceId) {
     console.log(`[Scanner] MCP OAuth scan failed for ${sourceId}: ${err.message}`);
     return null; // Fall through to unconfigured
   }
+}
+
+/**
+ * True when an MCP OAuth access token is expired (or within `bufferMs` of
+ * expiring, to avoid racing expiry mid-scan). Exported for tests.
+ */
+export function isMcpGrantExpired(grant, now = new Date(), bufferMs = 60_000) {
+  if (!grant || !grant.expiresIn) return false;
+  const expiresAt = grant.obtainedAt + grant.expiresIn * 1000;
+  return now.getTime() >= expiresAt - bufferMs;
 }
 
 /**
