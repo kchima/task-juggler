@@ -5,6 +5,85 @@ threads, Linear tickets, and multiple AI sessions. Tracks in-flight work, shows
 who each item is waiting on, and surfaces the single best next thing to do.
 Depth-first, finishing-biased — not a breadth-first to-do list.
 
+## Quick start — the local app
+
+The primary product is a **local web app + localhost service** (`app/`). Run it,
+open the browser, connect sources, and paste API tokens to pull in work.
+
+```bash
+./run.sh        # or: npm start
+# open http://localhost:3000  (binds to 127.0.0.1 only)
+```
+
+Sources connect two ways: **OAuth via "Connect with browser"** (Linear, Todoist —
+zero-setup through their hosted MCP endpoints) or a **paste-an-API-token** (Slack,
+Devin). Tokens you paste are stored in your macOS Keychain and survive restarts.
+
+AI classification is on by default once you set an OpenRouter key: it re-judges
+new/changed work every few minutes (within a daily budget) and surfaces what
+needs you at the top. See ["Getting an API token for each source"](#getting-an-api-token-for-each-source) below.
+
+## Getting an API token for each source
+
+### Slack
+
+A Slack token works, but note that **on modern Slack every token still comes
+from a Slack app** — the old "grab a token" pages are deprecated. The good news:
+getting a bot token is quick and involves **none** of the OAuth redirect/PKCE
+boilerplate.
+
+1. Go to https://api.slack.com/apps → **Create New App → From scratch**.
+2. Under **OAuth & Permissions → Bot Token Scopes**, add:
+   `search:read`, `search:read.private`, `channels:history`, `groups:history`,
+   `mpim:history`, `im:history`, `users:read`, `channels:read`, `files:read`,
+   `emoji:read`, `reactions:read`.
+3. **Install to Workspace** (your workspace may require admin approval).
+4. Copy the **Bot User OAuth Token** (`xoxb-…`) from **OAuth & Permissions**.
+5. Task Juggler → **Connections → Slack → Add Slack token** → paste it.
+
+A bot token searches the channels its bot is in. For the strongest "threads I
+need to reply to" signal (`to:me` search), a **user token** (`xoxp-…`) is better
+but now requires an OAuth flow — use Task Juggler's **"Advanced: OAuth (requires
+a Slack app)"** option for that.
+
+### Devin
+
+1. Sign in at https://app.devin.ai, then open your **account settings → API / service users**.
+2. Create an **API key** (Devin service-user keys start with `cog_`).
+3. Task Juggler → **Connections → Devin → API Token** → paste the `cog_…` key.
+
+(Devin's hosted MCP has no OAuth — it is key-authenticated only. An org-scoped
+service-user key works on its own; enterprise/org-scoped keys may additionally
+need an org id.)
+
+### Linear
+
+Prefer **Connect with browser** — OAuth through `mcp.linear.app`, zero-setup.
+If you'd rather use a key:
+
+1. Linear app → **Settings → Security & permissions → Personal API keys → Create**,
+   then copy the `lin_api_…` key.
+2. Set it as the `LINEAR_API_KEY` environment variable before starting the
+   server (the Linear UI entry is OAuth; the key path is env-based).
+
+### Todoist
+
+Prefer **Connect with browser** — OAuth through `ai.todoist.net`, zero-setup,
+read-only `data:read` scope. If you want a plain token instead, Todoist →
+**Settings → Integrations → API token**, and set it as `TODOIST_API_TOKEN`
+(Todoist's UI entry is OAuth; the token path is env-based).
+
+### OpenRouter (the AI classifier)
+
+1. https://openrouter.ai/keys → **Create API key** → copy the `sk-or-…` key.
+2. Make it available to the server process, e.g. `OPENROUTER_API_KEY=sk-or-… ./run.sh`
+   (or `export OPENROUTER_API_KEY=…` before starting).
+
+The classifier pins the cheap `deepseek/deepseek-v4-flash-0731` by default, runs
+every few minutes, and stops once it hits the `$0.25/day` budget. Tune with
+`TASK_JUGGLER_AI_*` env vars, or set `TASK_JUGGLER_AI_ENABLED=false` to disable
+AI classification entirely.
+
 
 ## Deliverables
 
@@ -16,7 +95,7 @@ Depth-first, finishing-biased — not a breadth-first to-do list.
 
 ```bash
 npm install
-npm test          # run the full Vitest suite (356 tests)
+npm test          # run the full Vitest suite (364 tests)
 npm run build      # rebuild dist/task-juggler.html from src/
 ```
 
