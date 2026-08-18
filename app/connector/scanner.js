@@ -91,13 +91,16 @@ async function scanLinearViaMcp(mcpClient) {
 
 async function scanTodoistViaMcp(mcpClient) {
   const result = emptyScanResult('todoist');
-  if (!mcpClient.hasTool('todoist_find_tasks')) {
+  // Resolve the task-list tool dynamically — the hosted Todoist MCP tool name
+  // varies; don't assume a hardcoded `todoist_find_tasks`.
+  const tool = pickTodoistTool(mcpClient.toolNames());
+  if (!tool) {
     result.status = 'unconfigured';
-    result.errors.push('todoist_find_tasks tool not available');
+    result.errors.push('No Todoist task-discovery tool available (looked for a find/search/list-tasks tool).');
     return result;
   }
   try {
-    const tasksResult = await mcpClient.callTool('todoist_find_tasks', { filter: 'today | overdue | p1', limit: 50 });
+    const tasksResult = await mcpClient.callTool(tool, { filter: 'today | overdue | p1', limit: 50 });
     const raw = extractTextContent(tasksResult);
     const tasks = safeJsonParse(raw)?.tasks || [];
     for (const task of tasks) {
@@ -110,6 +113,27 @@ async function scanTodoistViaMcp(mcpClient) {
     result.errors.push(`Todoist: ${err.message}`);
   }
   return result;
+}
+
+/**
+ * Pick a Todoist task-discovery tool from the available MCP tool names.
+ * Prefers a "find / search / list / get tasks" tool; falls back to the legacy
+ * hardcoded name for backwards compatibility.
+ */
+function pickTodoistTool(names) {
+  const list = names || [];
+  const rank = (n) => {
+    const s = n.toLowerCase();
+    let score = 0;
+    if (/task/.test(s)) score += 2;
+    if (/find|search/.test(s)) score += 4;
+    else if (/list/.test(s)) score += 3;
+    else if (/get/.test(s)) score += 1;
+    return score;
+  };
+  if (list.length === 0) return null;
+  const sorted = [...list].sort((a, b) => rank(b) - rank(a));
+  return rank(sorted[0]) > 0 ? sorted[0] : (list.includes('todoist_find_tasks') ? 'todoist_find_tasks' : null);
 }
 
 // --- Helpers ---------------------------------------------------------------

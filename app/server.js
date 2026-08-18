@@ -324,7 +324,7 @@ app.get('/api/auth/callback/:provider', async (req, res) => {
   <h1>Connected to ${result.name}</h1>
   <p>Task Juggler has been authorized to access your ${result.name} data.<br>
      You can close this tab and return to the main app.</p>
-  <a href="/" target="_blank">← Return to Task Juggler</a>
+  <a href="/" >← Return to Task Juggler</a>
 </div>
 </body>
 </html>`);
@@ -353,7 +353,7 @@ app.get('/api/auth/callback/:provider', async (req, res) => {
   <h1>Connection Failed</h1>
   <div class="error-detail">${escapeHtml(err.message)}</div>
   <p>Please try again from the Task Juggler app.</p>
-  <a href="/" target="_blank">← Return to Task Juggler</a>
+  <a href="/" >← Return to Task Juggler</a>
 </div>
 </body>
 </html>`);
@@ -488,6 +488,7 @@ app.get('/api/auth/mcp-callback/:provider', async (req, res) => {
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Connected — Task Juggler</title>
+<script>setTimeout(function(){ try { window.close(); } catch(e) {} }, 1500);</script>
 <style>
   body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f1117;color:#e1e4eb;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
   .card{background:#1a1d27;border:1px solid #2a2e3a;border-radius:8px;padding:40px;text-align:center;max-width:480px}
@@ -499,11 +500,13 @@ app.get('/api/auth/mcp-callback/:provider', async (req, res) => {
 </style></head>
 <body><div class="card">
   <div class="icon">✓</div>
-  <h1>Connected to ${result.name || provider}</h1>
-  <p>Task Juggler has been authorized.<br>You can close this tab and return to the main app.</p>
-  <a href="/" target="_blank">← Return to Task Juggler</a>
+  <h1>Connected</h1>
+  <p>${escapeHtml(result.name || provider)} has been authorized.<br>This window will close — return to Task Juggler.</p>
+  <a href="/">← Return to Task Juggler</a>
 </div></body></html>`);
   } catch (err) {
+    // Surface the failure server-side so run.sh's log captures it.
+    console.error(`[MCP OAuth] Callback failed for ${provider}:`, err && err.message, JSON.stringify(req.query));
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.status(400).send(`<!DOCTYPE html>
 <html lang="en">
@@ -517,14 +520,14 @@ app.get('/api/auth/mcp-callback/:provider', async (req, res) => {
   .icon{font-size:3rem;margin-bottom:16px}
   a{color:#5b7cfa;text-decoration:none;padding:8px 20px;border:1px solid #5b7cfa;border-radius:6px;display:inline-block}
   a:hover{background:#5b7cfa;color:#fff}
-  .detail{font-size:0.85rem;color:#e5534b;background:rgba(229,83,75,0.1);border-radius:4px;padding:8px 12px;margin-bottom:16px}
+  .detail{font-size:0.85rem;color:#e5534b;background:rgba(229,83,75,0.1);border-radius:4px;padding:8px 12px;margin-bottom:16px;word-break:break-word}
 </style></head>
 <body><div class="card">
   <div class="icon">✕</div>
   <h1>Connection Failed</h1>
   <div class="detail">${escapeHtml(err.message)}</div>
-  <p>Please try again.</p>
-  <a href="/" target="_blank">← Return to Task Juggler</a>
+  <p>Please try again from the Task Juggler app, then check the server log for details.</p>
+  <a href="/">← Return to Task Juggler</a>
 </div></body></html>`);
   }
 });

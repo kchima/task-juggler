@@ -177,12 +177,20 @@ async function handleConnect(providerId) {
     const data = await api(`${endpoint}/${providerId}`, { method: 'POST' });
     _pendingAuth = { providerId, state: data.state };
 
-    // Open in new browser window
-    const authWindow = window.open(data.authUrl, '_blank', 'width=800,height=700');
+    // Open the authorization URL in a popup. Poll for completion either way so
+    // the app updates the moment the provider redirects back.
+    let authWindow = null;
+    try {
+      authWindow = window.open(data.authUrl, '_blank', 'width=800,height=700');
+    } catch {}
 
     if (!authWindow || authWindow.closed || typeof authWindow.closed === 'undefined') {
-      window.location.href = data.authUrl;
-      return;
+      // Popup blocked: keep the app in this tab and surface the link for manual
+      // open, rather than navigating the app away and losing poll state.
+      try { navigator.clipboard.writeText(data.authUrl); } catch {}
+      const link = window.prompt('Popup blocked. Copy the authorization link and open it in a new tab:', data.authUrl);
+      void link;
+      showToast(`Authorize in the new tab, then return here`, 'info');
     }
 
     startPollingForConnection(providerId);
