@@ -326,22 +326,7 @@ export async function handleCallback(providerId, queryParams) {
     throw new Error(errMsg);
   }
 
-  const tokenData = JSON.parse(response.body);
-
-  if (!tokenData.access_token) {
-    throw new Error('Token exchange did not return an access_token');
-  }
-
-  // Build the grant object with metadata
-  const grant = {
-    accessToken: tokenData.access_token,
-    tokenType: tokenData.token_type || 'Bearer',
-    scope: tokenData.scope || config.defaultScope,
-    expiresIn: tokenData.expires_in || null,
-    refreshToken: tokenData.refresh_token || null,
-    obtainedAt: Date.now(),
-    providerId,
-  };
+  const grant = parseTokenExchange(response.body, config, providerId).grant;
 
   // Enhance grant with account info (non-blocking — fetch in background)
   storeCredential(config.oauthGrantService, grant);
@@ -350,7 +335,7 @@ export async function handleCallback(providerId, queryParams) {
   fetchAccountInfo(providerId, grant.accessToken).then((accountInfo) => {
     const current = getCredential(config.oauthGrantService);
     if (current) {
-      storeCredential(config.oauthGrantService, { ...current, accountInfo });
+      storeCredential(config.oauthGrantService, { ...current, accountInfo: accountInfo || current.accountInfo });
     }
   }).catch(() => {
     // Non-critical — ignore failures
@@ -361,6 +346,47 @@ export async function handleCallback(providerId, queryParams) {
     name: config.name,
     icon: config.icon,
     accountInfo: null, // populated async
+  };
+}
+
+/**
+ * Parse a token-exchange response into a grant, handling provider quirks:
+ * - Slack returns HTTP 200 even for OAuth errors, as { ok: false, error }.
+ * - User-token-only flows (e.g. Slack user scopes) put the token under
+ *   `authed_user` instead of the top level — including `expires_in` and
+ *   `refresh_token` when token rotation is enabled.
+ * Exported for tests.
+ */
+export function parseTokenExchange(body, config, providerId) {
+  let tokenData;
+  try {
+    tokenData = JSON.parse(body);
+  } catch {
+    throw new Error('Token exchange returned an unreadable response');
+  }
+
+  if (tokenData && tokenData.ok === false) {
+    throw new Error(`Token exchange failed: ${tokenData.error || 'unknown_error'}`);
+  }
+
+  const user = tokenData.authed_user || {};
+  const accessToken = tokenData.access_token || user.access_token || null;
+  if (!accessToken) {
+    throw new Error('Token exchange did not return an access_token');
+  }
+
+  return {
+    grant: {
+      accessToken,
+      tokenType: tokenData.token_type || user.token_type || 'Bearer',
+      scope: tokenData.scope || user.scope || (config && config.defaultScope) || null,
+      expiresIn: tokenData.expires_in ?? user.expires_in ?? null,
+      refreshToken: tokenData.refresh_token || user.refresh_token || null,
+      obtainedAt: Date.now(),
+      providerId,
+      accountInfo: tokenData.team ? { teamId: tokenData.team.id, teamName: tokenData.team.name } : null,
+      authedUserId: user.id || null,
+    },
   };
 }
 
