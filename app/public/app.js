@@ -45,8 +45,8 @@ const PROVIDERS = {
     supportsMCP: false,
     supportsToken: true,
     description: 'Active sessions',
-    tokenLabel: 'DEVIN_API_TOKEN',
-    tokenHint: '...',
+    tokenLabel: 'Devin service-user API key',
+    tokenHint: 'cog-… (starts with cog_)',
   },
   claude: {
     id: 'claude',

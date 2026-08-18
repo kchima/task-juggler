@@ -1,9 +1,19 @@
 // Tests for the source scanner
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { scanAllSources, checkMcpCapabilities, isMcpGrantExpired } from '../../app/connector/scanner.js';
 import { getSource, getEnabledSources } from '../../app/connector/registry.js';
 import { FakeMcpServer, createSlackTestServer, createLinearTestServer, createTodoistTestServer } from '../../app/connector/fakeMcpServer.js';
 import { McpClient } from '../../app/connector/mcpClient.js';
+
+// Isolate the scanner from the developer's real Keychain/network: no stored
+// grants means no OAuth refresh or MCP tool calls during tests. This keeps the
+// suite fast, deterministic, and hermetic on any machine.
+vi.mock('../../app/auth/credentialStore.js', () => ({
+  getCredential: () => null,
+  storeCredential: () => {},
+  deleteCredential: () => {},
+  listCredentials: () => [],
+}));
 
 describe('registry', () => {
   it('returns source definitions for all known sources', () => {

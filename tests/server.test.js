@@ -174,7 +174,7 @@ describe('Server API', () => {
       expect(['ok', 'unconfigured', 'error']).toContain(res.body.results.linear.status);
       // Todoist may have OAuth grant from Keychain
       expect(['ok', 'unconfigured', 'error']).toContain(res.body.results.todoist.status);
-    });
+    }, 30000);
   });
 
   describe('GET /api/sources/items', () => {

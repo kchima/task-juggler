@@ -222,8 +222,10 @@ export async function scanSlackDirect(botToken) {
 
     // Two simple queries (Slack search doesn't reliably support boolean OR):
     // threads directed at the user, and threads the user started. Both use the
-    // same dedupe map below.
-    const queries = ['is:thread to:me after:yesterday', 'is:thread from:me after:yesterday'];
+    // same dedupe map below. `after:` requires an actual YYYY-MM-DD date — the
+    // word "yesterday" is rejected by Slack with invalid_arguments.
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const queries = [`is:thread to:me after:${yesterday}`, `is:thread from:me after:${yesterday}`];
     const byKey = new Map();
 
     for (const query of queries) {
@@ -297,29 +299,56 @@ function safeJsonParseBody(resp) {
   try { return JSON.parse(resp.body); } catch { return null; }
 }
 
-// --- Adapter: Devin via Public REST API ---
+// --- Adapter: Devin via v3 REST API ---
 
-export async function scanDevinDirect(apiToken) {
+/**
+ * Scan Devin sessions for in-flight work using the current v3 API.
+ *
+ * Auth: a service-user API key (`cog_…`) with the ViewOrgSessions permission.
+ * The endpoint is org-scoped (`/v3/organizations/{org_id}/sessions`), so the
+ * org id is resolved from an env var, or discovered via GET /v3/self.
+ *
+ * Active signals (Task Juggler "in progress / waiting" relevance):
+ *   status: claimed | running            → in flight
+ *   status_detail: working               → actively running
+ *   status_detail: waiting_for_user      → Devin needs YOU (top of the queue)
+ *   status_detail: waiting_for_approval  → Devin needs an approval (you)
+ */
+export async function scanDevinDirect(apiToken, orgId = null) {
   const result = { sourceId: 'devin', status: 'ok', items: [], errors: [], detected: [] };
 
   if (!apiToken) {
     result.status = 'unconfigured';
-    result.errors.push('DEVIN_API_TOKEN not configured. Set the DEVIN_API_TOKEN environment variable.\nSign up at https://app.devin.ai/settings/api to get a token.');
+    result.errors.push('Devin API key not configured. Add a Devin API key (cog_…) in the Connections panel.');
     return result;
   }
 
-  try {
-    const response = await fetchUrl('https://api.devin.ai/v1/sessions?status=in_progress,running', {
-      headers: { 'Authorization': `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
-    });
+  const devinHeaders = { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' };
 
-    if (response.status === 404) {
-      // Devin API may be at a different endpoint
-      result.status = 'unconfigured';
-      result.errors.push('Devin API endpoint not found at expected URL. The API may have changed or requires a different base URL.');
+  try {
+    // Resolve the org id (path parameter) if not supplied.
+    const resolvedOrgId = orgId || await discoverDevinOrgId(apiToken);
+    if (!resolvedOrgId) {
+      result.status = 'error';
+      result.errors.push('Could not determine your Devin organization ID. Set the DEVIN_ORG_ID environment variable.');
       return result;
     }
 
+    const response = await fetchUrl(
+      `https://api.devin.ai/v3/organizations/${encodeURIComponent(resolvedOrgId)}/sessions?first=50`,
+      { headers: devinHeaders },
+    );
+
+    if (response.status === 401 || response.status === 403) {
+      result.status = 'error';
+      result.errors.push(`Devin auth failed (${response.status}). Use a service-user API key (cog_…) with ViewOrgSessions permission.`);
+      return result;
+    }
+    if (response.status === 404) {
+      result.status = 'error';
+      result.errors.push('Devin v3 sessions endpoint not found for this org. Check DEVIN_ORG_ID.');
+      return result;
+    }
     if (response.status !== 200) {
       result.status = 'error';
       result.errors.push(`Devin API returned status ${response.status}`);
@@ -327,16 +356,28 @@ export async function scanDevinDirect(apiToken) {
     }
 
     const data = JSON.parse(response.body);
-    const sessions = data.sessions || data.data || [];
+    const sessions = (data && data.items) || [];
 
-    for (const session of sessions) {
-      const key = `devin:${session.id || session.session_id}`;
+    for (const s of sessions) {
+      const id = s.session_id;
+      const status = s.status;
+      const detail = s.status_detail;
+      // In-flight work: claimed or running; a waiting_* detail means Devin is
+      // blocked on you — keep that visible as a stronger signal.
+      if (status !== 'claimed' && status !== 'running') continue;
+      const waitingOnUser = detail === 'waiting_for_user' || detail === 'waiting_for_approval';
+      const label = (s.title || `Devin session ${id.slice(0, 8)}`)
+        + `${detail ? ` — ${detail.replace(/_/g, ' ')}` : ''}`;
+      const key = `devin:${id}`;
       result.items.push({
         key,
-        label: session.name || session.description || `Session ${session.id?.slice(0, 8)}`,
-        url: session.url || `https://app.devin.ai/sessions/${session.id}`,
+        label,
+        url: s.url || `https://app.devin.ai/sessions/${id}`,
+        status: waitingOnUser ? 'waiting_for_user' : 'in_progress',
+        priority: waitingOnUser ? 'high' : null,
+        raw: { sessionId: id, status, statusDetail: detail, title: s.title },
       });
-      result.detected.push({ key, label: session.name || 'Devin session', outcome: 'added' });
+      result.detected.push({ key, label, outcome: waitingOnUser ? 'needs-you' : 'in-flight' });
     }
   } catch (err) {
     result.status = 'error';
@@ -344,6 +385,32 @@ export async function scanDevinDirect(apiToken) {
   }
 
   return result;
+}
+
+/**
+ * Resolve the Devin organization id via GET /v3/self (documented in Devin's
+ * auth guide as the way to find your org id). Defensive across response shapes.
+ */
+async function discoverDevinOrgId(apiToken) {
+  try {
+    const resp = await fetchUrl('https://api.devin.ai/v3/self', {
+      headers: { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
+    });
+    if (resp.status !== 200) return null;
+    const body = JSON.parse(resp.body);
+    const data = body.data || body;
+    // Prefer a direct org_id, then an organizations list (find the default or first).
+    const direct = data.org_id || data.organization_id || data.organization?.id || data.organizationId;
+    if (direct) return direct;
+    const orgs = data.organizations || data.organizations_list || [];
+    if (Array.isArray(orgs) && orgs.length > 0) {
+      const active = orgs.find((o) => o.is_default) || orgs.find((o) => o.is_active) || orgs[0];
+      return active?.id || active?.org_id || null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // --- Source config lookup --------------------------------------------------

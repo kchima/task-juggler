@@ -254,10 +254,10 @@ export async function scanAllSources(mcpClient = null, envConfig = {}) {
 
   // --- Devin ---
   if (direct.devin) {
-    results.devin = await scanDevinDirect(direct.devin);
+    results.devin = await scanDevinDirect(direct.devin, process.env.DEVIN_ORG_ID || null);
   } else {
     results.devin = scanResultUnconfigured('devin');
-    results.devin.errors.push('DEVIN_API_TOKEN not configured. To enable: set the DEVIN_API_TOKEN environment variable (get a token from https://app.devin.ai/settings/api).');
+    results.devin.errors.push('Devin API key not configured. Add a Devin API key (cog_…) in the Connections panel.');
   }
 
   // --- Claude (local session discovery — read-only metadata) ---
