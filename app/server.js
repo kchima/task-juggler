@@ -329,6 +329,8 @@ app.get('/api/auth/callback/:provider', async (req, res) => {
 </body>
 </html>`);
   } catch (err) {
+    // Surface the failure server-side so run.log captures the real Slack error.
+    console.error(`[OAuth] Callback failed for ${provider}:`, err && err.message, JSON.stringify(req.query));
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.status(400).send(`<!DOCTYPE html>
 <html lang="en">
