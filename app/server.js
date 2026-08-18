@@ -308,6 +308,7 @@ app.get('/api/auth/callback/:provider', async (req, res) => {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Connected — Task Juggler</title>
+<script>setTimeout(function(){ try { window.close(); } catch(e){} }, 1000);</script>
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f1117; color: #e1e4eb; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
   .card { background: #1a1d27; border: 1px solid #2a2e3a; border-radius: 8px; padding: 40px; text-align: center; max-width: 480px; }
