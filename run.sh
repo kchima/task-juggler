@@ -15,6 +15,15 @@ set -u
 
 cd "$(dirname "$0")"
 
+# Optional local env file (e.g. OPENROUTER_API_KEY / ANTHROPIC_API_KEY /
+# DEVIN_API_KEY) so keys don't have to be re-exported each launch.
+if [ -f .env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . ./.env
+  set +a
+fi
+
 DEV=0
 if [ "${1:-}" = "--dev" ]; then
   DEV=1

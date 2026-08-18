@@ -230,8 +230,10 @@ export async function scanSlackDirect(botToken) {
 
     for (const query of queries) {
       try {
-        const searchResp = await postJson(`${SLACK_API}/search.messages`, { query, count: 20, sort: 'timestamp' }, {
-          headers: { ...auth, 'Content-Type': 'application/json' },
+        // search.messages requires FORM-ENCODED params — a JSON body is rejected
+        // with invalid_arguments + "missing required field: query".
+        const searchResp = await postFormUrl(`${SLACK_API}/search.messages`, { query, count: 20, sort: 'timestamp' }, {
+          headers: { ...auth },
         });
         const searchData = safeJsonParseBody(searchResp);
         if (searchData && searchData.ok && searchData.messages?.matches) {

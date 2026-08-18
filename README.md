@@ -75,16 +75,26 @@ read-only `data:read` scope. If you want a plain token instead, Todoist →
 **Settings → Integrations → API token**, and set it as `TODOIST_API_TOKEN`
 (Todoist's UI entry is OAuth; the token path is env-based).
 
-### OpenRouter (the AI classifier)
+### AI classifier (OpenRouter or Anthropic)
 
+The classifier decides which discovered items are active tasks, who it's
+waiting on, and what needs you next. It is **off until you set a key below** —
+this is the step that turns discovered items into tasks.
+
+**Option A — OpenRouter (default, cheap):**
 1. https://openrouter.ai/keys → **Create API key** → copy the `sk-or-…` key.
-2. Make it available to the server process, e.g. `OPENROUTER_API_KEY=sk-or-… ./run.sh`
-   (or `export OPENROUTER_API_KEY=…` before starting).
+2. `echo 'OPENROUTER_API_KEY=sk-or-…' > .env` (or export it before `./run.sh`).
 
-The classifier pins the cheap `deepseek/deepseek-v4-flash-0731` by default, runs
-every few minutes, and stops once it hits the `$0.25/day` budget. Tune with
-`TASK_JUGGLER_AI_*` env vars, or set `TASK_JUGGLER_AI_ENABLED=false` to disable
-AI classification entirely.
+**Option B — Anthropic (Claude):**
+1. https://console.anthropic.com/settings/keys → create a key → `ANTHROPIC_API_KEY=sk-ant-…`.
+2. Set `TASK_JUGGLER_CLASSIFIER_PROVIDER=anthropic` and optionally
+   `TASK_JUGGLER_CLASSIFIER_MODEL=<claude model>` in `.env`.
+
+Defaults: provider `openrouter`, model `deepseek/deepseek-v4-flash-0731`, runs
+every few minutes, stops once it hits the `$0.25/day` budget
+(`TASK_JUGGLER_AI_MAX_DAILY_USD`). Keys can go in a `.env` file that `run.sh`
+loads automatically, or in the server process environment. Set
+`TASK_JUGGLER_AI_ENABLED=false` to disable AI classification entirely.
 
 
 ## Deliverables

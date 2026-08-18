@@ -571,6 +571,7 @@ export async function handleMcpCallback(providerId, queryParams) {
 
   const tokenData = JSON.parse(response.body);
   if (!tokenData.access_token) throw new Error('No access_token in response');
+  console.log(`[MCP OAuth] token exchange ok for ${providerId}: hasToken=${!!tokenData.access_token} expires=${tokenData.expires_in ?? 'n/a'} refresh=${!!tokenData.refresh_token}`);
 
   // Store the grant
   const grant = {
@@ -584,7 +585,13 @@ export async function handleMcpCallback(providerId, queryParams) {
     mcpUrl,
   };
 
-  storeCredential(`${providerId}-mcp-grant`, grant);
+  try {
+    storeCredential(`${providerId}-mcp-grant`, grant);
+    console.log(`[MCP OAuth] Stored grant for ${providerId} in Keychain`);
+  } catch (err) {
+    console.error(`[MCP OAuth] FAILED to store grant for ${providerId}:`, err && err.message);
+    throw err;
+  }
 
   // Fetch MCP server info with the token to confirm it works
   try {

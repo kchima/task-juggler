@@ -20,12 +20,16 @@ export class OpenRouterError extends Error {
  * the frontend — the frontend may only request an app-level action.
  */
 export function getAiConfig() {
-  const primary = process.env.TASK_JUGGLER_CLASSIFIER_MODEL || 'deepseek/deepseek-v4-flash-0731';
+  const provider = (process.env.TASK_JUGGLER_CLASSIFIER_PROVIDER || 'openrouter').toLowerCase();
+  const primary = process.env.TASK_JUGGLER_CLASSIFIER_MODEL
+    || (provider === 'anthropic' ? 'claude-sonnet-4-5-20250929' : 'deepseek/deepseek-v4-flash-0731');
   const configuredFallbacks = (process.env.TASK_JUGGLER_CLASSIFIER_FALLBACKS || '')
     .split(',').map((s) => s.trim()).filter(Boolean);
   const enabled = (process.env.TASK_JUGGLER_AI_ENABLED || 'true').toLowerCase() !== 'false';
   return {
+    provider,
     apiKey: process.env.OPENROUTER_API_KEY || null,
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY || null,
     enabled,
     model: primary,
     fallbacks: configuredFallbacks,
@@ -37,15 +41,26 @@ export function getAiConfig() {
 }
 
 export function isAiConfigured(config = getAiConfig()) {
-  return config.enabled && !!config.apiKey;
+  if (!config.enabled) return false;
+  if (config.provider === 'anthropic') return !!config.anthropicApiKey;
+  return !!config.apiKey;
 }
 
 /**
- * Call OpenRouter chat completions with strict JSON output for one item.
- * Returns { model, generationId, usage, costUsd, content } or throws
- * OpenRouterError on failure.
+ * Call the classifier with strict JSON output for one item.
+ * Dispatches to Anthropic's direct API when configured, otherwise OpenRouter.
+ * Returns { model, generationId, usage, costUsd, content } or throws.
  */
 export async function classifyItem({ config = getAiConfig(), model, system, prompt, schema, maxTokens, signal }) {
+  if (config.provider === 'anthropic') {
+    const { classifyWithAnthropic } = await import('./anthropicClient.js');
+    return classifyWithAnthropic({ config, model, system, prompt, schema, maxTokens, signal });
+  }
+  return classifyWithOpenRouter({ config, model, system, prompt, schema, maxTokens, signal });
+}
+
+/** @private */
+async function classifyWithOpenRouter({ config = getAiConfig(), model, system, prompt, schema, maxTokens, signal }) {
   const selectedModel = model || config.model;
   const payload = {
     model: selectedModel,

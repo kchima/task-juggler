@@ -3,3 +3,6 @@ data/
 *.db
 *.db-wal
 *.db-shm
+
+# Local secrets loaded by run.sh
+.env
