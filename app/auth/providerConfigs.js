@@ -39,10 +39,16 @@ export const PROVIDER_CONFIGS = {
     authorizationUrl: 'https://slack.com/oauth/v2/authorize',
     tokenUrl: 'https://slack.com/api/oauth.v2.access',
     revokeUrl: null, // Slack tokens are revoked via app management
-    scopes: ['search:read', 'users:read', 'channels:read', 'channels:history'],
-    defaultScope: 'search:read,users:read,channels:read,channels:history',
-    // User scopes (not bot scopes) for local app
-    userScope: 'search:read,channels:read,channels:history',
+    // User scopes (not bot scopes) for a local, user-token app — required for
+    // the localhost desktop-redirect flow and for reading what the user can see.
+    scopes: [
+      'search:read', 'search:read.private',
+      'channels:read', 'channels:history',
+      'groups:history', 'im:history', 'mpim:history',
+      'users:read', 'reactions:read', 'files:read', 'emoji:read',
+    ],
+    userScope: 'search:read,search:read.private,channels:read,channels:history,groups:history,im:history,mpim:history,users:read,reactions:read,files:read,emoji:read',
+    defaultScope: 'search:read,channels:read,channels:history',
     supportsPKCE: true,
     supportsDCR: false,   // Requires creating a Slack app manually
     tokenEndpointAuthMethod: 'none', // PKCE = public client, no secret needed
@@ -53,20 +59,20 @@ export const PROVIDER_CONFIGS = {
     requiredScopes: ['search:read', 'channels:read', 'channels:history'],
     description: 'Messages and threads',
     setupGuide: [
-      '1. Create a Slack app at https://api.slack.com/apps',
-      '2. Under "OAuth & Permissions", enable PKCE',
+      '1. Create a Slack app at https://api.slack.com/apps (personal dev account — this is NOT an install into your workspace).',
+      '2. Under "OAuth & Permissions", enable PKCE (one-way).',
       `3. Add redirect URL: http://localhost:3000/api/auth/callback/slack`,
-      '4. Add user scopes: search:read, channels:read, channels:history',
-      '5. Copy the Client ID and paste it here',
+      '4. Add USER Token Scopes: search:read, search:read.private, channels:read, channels:history, groups:history, im:history, mpim:history, users:read, reactions:read, files:read, emoji:read',
+      '5. Copy the Client ID (Basic Information) and paste it here. No client secret is needed with PKCE.',
+      '6. Click "Sign in with Slack" — authorize in the browser, then it is connected.',
     ],
     requiresClientSetup: true,
     clientSetupInstructions: [
-      'Create a Slack app and enable PKCE to use browser OAuth.',
-      'Open App Management → Create New App → From scratch.',
-      'Navigate to OAuth & Permissions → Enable PKCE (one-way).',
-      `Add ${'http://localhost:3000/api/auth/callback/slack'} as a Redirect URL.`,
-      'Add User Token Scopes: search:read, channels:read, channels:history.',
-      'Copy the Client ID from Basic Information.',
+      'Open https://api.slack.com/apps → Create New App → Blank app.',
+      'Under OAuth & Permissions → enable PKCE (one-way).',
+      `Add http://localhost:3000/api/auth/callback/slack as a Redirect URL.`,
+      'Add USER Token Scopes: search:read, search:read.private, channels:read, channels:history, groups:history, im:history, mpim:history, users:read, reactions:read, files:read, emoji:read.',
+      'Copy the Client ID from Basic Information (no secret needed with PKCE).',
     ],
   },
 

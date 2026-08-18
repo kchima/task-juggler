@@ -13,7 +13,7 @@ const PROVIDERS = {
     icon: '💬',
     color: '#4a154b',
     supportsOAuth: true,
-    isMcpOAuth: true,
+    isMcpOAuth: false, // direct user-token OAuth (Claude-style), not hosted MCP
     supportsToken: true,
     tokenLabel: 'Slack token — xoxb- (bot) or xoxp- (user)',
     tokenHint: 'xoxb-… / xoxp-…',
@@ -359,102 +359,95 @@ function renderSourceEntry(provider, conn, scanResult) {
 
   // Action buttons
   let actionHtml = '';
-  if (provider.isMcpOAuth) {
-    if (provider.id === 'slack') {
-      // Slack is token-first: paste a bot/user token (common, no app setup).
-      // OAuth remains available as an advanced option requiring a Slack app.
-      const hasClientCreds = conn && conn.appConfigured;
-      const tokenConfigured = conn && conn.tokenConfigured;
-      if (isConnected) {
-        const scopeLabel = conn.scope ? conn.scope.split(' ').slice(0, 2).join(', ') : '';
-        actionHtml = `
-          <div class="conn-status">
-            <span class="conn-badge connected">Connected</span>
-            ${conn.mcpUrl ? `<span class="conn-scope">MCP</span>` : ''}
-            ${scopeLabel ? `<span class="conn-scope">${escapeHtml(scopeLabel)}</span>` : ''}
-            <button class="btn small conn-disconnect" data-disconnect="${provider.id}">Disconnect</button>
-          </div>
-        `;
-      } else if (isPendingOAuth) {
-        actionHtml = `
-          <div class="conn-status">
-            <span class="spinner"></span>
-            <span class="conn-pending">Waiting for browser authorization…</span>
-          </div>
-        `;
-      } else {
-        actionHtml = `
-          <div class="conn-status">
-            <button class="btn small conn-token-toggle" data-token-toggle="${provider.id}">Add Slack token</button>
-            ${tokenConfigured ? `<span class="conn-badge connected">Token configured</span>` : ''}
-          </div>
-          <div class="conn-token-config hidden" data-token-config="${provider.id}">
-            <input type="password" class="conn-token-input" data-token-input="${provider.id}"
-                   placeholder="Slack token — xoxb- (bot) or xoxp- (user)">
-            <button class="btn small conn-token-save" data-token-save="${provider.id}">Save</button>
-          </div>
-          <div class="slack-advanced">
-            <button class="btn small conn-setup" data-setup="${provider.id}">
-              Advanced: OAuth (requires a Slack app)
-            </button>
-            <div class="conn-setup-config hidden" data-setup-config="${provider.id}">
-              ${hasClientCreds ? `
-                <div class="conn-status">
-                  <button class="btn small primary conn-connect" data-connect="${provider.id}">Connect with browser</button>
-                </div>
-              ` : `
-                <div class="setup-guide">
-                  <p><strong>To connect Slack with your own app, first create one:</strong></p>
-                  <ol>
-                    <li>Go to <a href="https://api.slack.com/apps" target="_blank">api.slack.com/apps</a></li>
-                    <li>Click <strong>Create New App → From scratch</strong></li>
-                    <li>Go to <strong>OAuth & Permissions</strong> → enable <strong>PKCE</strong> (one-way)</li>
-                    <li>Add <strong>Redirect URL</strong>: <code>http://localhost:3000/api/auth/mcp-callback/slack</code></li>
-                    <li>Add <strong>User Token Scopes</strong>:<br>
-                      <code>search:read.public, search:read.private, channels:history,<br>
-                      groups:history, mpim:history, im:history, users:read,<br>
-                      channels:read, files:read, emoji:read, reactions:read</code></li>
-                    <li>Go to <strong>Basic Information</strong> and copy <strong>Client ID</strong> and <strong>Client Secret</strong></li>
-                  </ol>
-                </div>
-                <div class="setup-form">
-                  <input type="text" class="conn-client-input" data-client-input="${provider.id}" placeholder="Client ID (e.g. 12345.67890)">
-                  <input type="password" class="conn-secret-input" data-secret-input="${provider.id}" placeholder="Client Secret">
-                  <button class="btn small primary conn-client-save" data-client-save="${provider.id}">Save & Connect</button>
-                </div>
-              `}
-            </div>
-          </div>
-        `;
-      }
+  if (provider.id === 'slack') {
+    // Slack: browser user-token OAuth is primary (Claude-style "Sign in with
+    // Slack"). A pasted bot/user token remains a fallback.
+    const appConfigured = conn && conn.appConfigured;
+    const tokenConfigured = conn && conn.tokenConfigured;
+    if (isConnected) {
+      const scopeLabel = conn.scope ? conn.scope.split(' ').slice(0, 2).join(', ') : '';
+      actionHtml = `
+        <div class="conn-status">
+          <span class="conn-badge connected">Connected</span>
+          ${scopeLabel ? `<span class="conn-scope">${escapeHtml(scopeLabel)}</span>` : ''}
+          <button class="btn small conn-disconnect" data-disconnect="${provider.id}">Disconnect</button>
+        </div>
+      `;
+    } else if (isPendingOAuth) {
+      actionHtml = `
+        <div class="conn-status">
+          <span class="spinner"></span>
+          <span class="conn-pending">Waiting for Slack authorization…</span>
+        </div>
+      `;
+    } else if (appConfigured) {
+      actionHtml = `
+        <div class="conn-status">
+          <button class="btn small primary conn-connect" data-connect="${provider.id}">Sign in with Slack</button>
+        </div>
+        <div class="conn-status">
+          <button class="btn small conn-token-toggle" data-token-toggle="${provider.id}">Use a bot/user token instead</button>
+          ${tokenConfigured ? `<span class="conn-badge connected">Token configured</span>` : ''}
+        </div>
+        <div class="conn-token-config hidden" data-token-config="${provider.id}">
+          <input type="password" class="conn-token-input" data-token-input="${provider.id}"
+                 placeholder="Slack token — xoxb- (bot) or xoxp- (user)">
+          <button class="btn small conn-token-save" data-token-save="${provider.id}">Save</button>
+        </div>
+      `;
     } else {
-      // MCP OAuth — zero-setup, just "Connect with browser" (Linear, Todoist)
-      if (isConnected) {
-        const scopeLabel = conn.scope ? conn.scope.split(' ').slice(0, 2).join(', ') : '';
-        actionHtml = `
-          <div class="conn-status">
-            <span class="conn-badge connected">Connected</span>
-            ${conn.mcpUrl ? `<span class="conn-scope">MCP</span>` : ''}
-            ${scopeLabel ? `<span class="conn-scope">${escapeHtml(scopeLabel)}</span>` : ''}
-            <button class="btn small conn-disconnect" data-disconnect="${provider.id}">Disconnect</button>
+      actionHtml = `
+        <div class="conn-status">
+          <span class="conn-unavailable">One-time Slack app setup required — then you can sign in.</span>
+        </div>
+        <div class="conn-setup-config" data-setup-config="${provider.id}">
+          <div class="setup-guide">
+            <p><strong>Set up the Slack app once (a private registration, not an install into your company workspace):</strong></p>
+            <ol>
+              <li>Create a Slack app at <a href="https://api.slack.com/apps" target="_blank" rel="noopener">api.slack.com/apps</a> → <strong>Blank app</strong>.</li>
+              <li><strong>OAuth &amp; Permissions → Enable PKCE</strong> (one-way).</li>
+              <li>Add <strong>Redirect URL</strong>: <code>http://localhost:3000/api/auth/callback/slack</code></li>
+              <li>Add <strong>User Token Scopes</strong>:<br>
+                <code>search:read, search:read.private, channels:read, channels:history,<br>
+                groups:history, im:history, mpim:history, users:read,<br>
+                reactions:read, files:read, emoji:read</code></li>
+              <li>Copy the <strong>Client ID</strong> from Basic Information (no secret needed with PKCE).</li>
+            </ol>
           </div>
-        `;
-      } else if (isPendingOAuth) {
-        actionHtml = `
-          <div class="conn-status">
-            <span class="spinner"></span>
-            <span class="conn-pending">Waiting for browser authorization…</span>
+          <div class="setup-form">
+            <input type="text" class="conn-client-input" data-client-input="${provider.id}" placeholder="Slack Client ID">
+            <button class="btn small primary conn-client-save" data-client-save="${provider.id}">Save &amp; Sign in with Slack</button>
           </div>
-        `;
-      } else {
-        actionHtml = `
-          <div class="conn-status">
-            <button class="btn small primary conn-connect" data-connect="${provider.id}">
-              Connect with browser
-            </button>
-          </div>
-        `;
-      }
+        </div>
+      `;
+    }
+  } else if (provider.isMcpOAuth) {
+    // MCP OAuth — zero-setup, just "Connect with browser" (Linear, Todoist)
+    if (isConnected) {
+      const scopeLabel = conn.scope ? conn.scope.split(' ').slice(0, 2).join(', ') : '';
+      actionHtml = `
+        <div class="conn-status">
+          <span class="conn-badge connected">Connected</span>
+          ${conn.mcpUrl ? `<span class="conn-scope">MCP</span>` : ''}
+          ${scopeLabel ? `<span class="conn-scope">${escapeHtml(scopeLabel)}</span>` : ''}
+          <button class="btn small conn-disconnect" data-disconnect="${provider.id}">Disconnect</button>
+        </div>
+      `;
+    } else if (isPendingOAuth) {
+      actionHtml = `
+        <div class="conn-status">
+          <span class="spinner"></span>
+          <span class="conn-pending">Waiting for browser authorization…</span>
+        </div>
+      `;
+    } else {
+      actionHtml = `
+        <div class="conn-status">
+          <button class="btn small primary conn-connect" data-connect="${provider.id}">
+            Connect with browser
+          </button>
+        </div>
+      `;
     }
   } else if (hasToken) {
     // Non-OAuth token-based (Devin)
@@ -883,18 +876,23 @@ async function handleSaveSourceToken(sourceId, token) {
 // ─── Slack app credential management ────────────────────────────────────
 async function handleSaveClientCredentials(providerId, clientId, clientSecret) {
   try {
-    await api(`/auth/mcp-setup/${providerId}`, {
+    // Direct OAuth setup route (clientId required; secret optional for PKCE).
+    await api(`/auth/setup/${providerId}`, {
       method: 'POST',
-      body: JSON.stringify({ clientId, clientSecret }),
+      body: JSON.stringify({ clientId, clientSecret: clientSecret || null }),
     });
-    showToast(`${PROVIDERS[providerId]?.name || providerId} app credentials saved`, 'success');
+    showToast(`${PROVIDERS[providerId]?.name || providerId} app configured`, 'success');
 
-    // Reload connections to update the UI with "Connect" button
+    // Reload connections to update the UI with "Sign in with Slack" button
     await loadConnections();
     render();
 
     // Now automatically start the OAuth flow
-    await handleConnect(providerId);
+    if (providerId === 'slack') {
+      await handleConnect('slack');
+    } else {
+      await handleConnect(providerId);
+    }
   } catch (err) {
     showToast(`Failed to save credentials: ${err.message}`, 'error');
   }

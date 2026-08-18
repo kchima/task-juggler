@@ -192,7 +192,15 @@ export async function scanAllSources(mcpClient = null, envConfig = {}) {
     if (mcpOAuthResult) {
       results.slack = mcpOAuthResult;
     } else if (hasAnyGrant('slack')) {
-      results.slack = scanResultWithError('slack', 'Slack is connected, but the last scan failed. The access token may be expired — reconnect from the Connections panel.');
+      // Prefer the direct user-token grant (slack-oauth-grant) for scanning —
+      // it reads what the user can see, including private channels and DMs.
+      let slackToken = null;
+      try { slackToken = await resolveOAuthToken('slack'); } catch { slackToken = null; }
+      if (slackToken) {
+        results.slack = await scanSlackDirect(slackToken);
+      } else {
+        results.slack = scanResultWithError('slack', 'Slack is connected, but the last scan failed. The access token may be expired — reconnect from the Connections panel.');
+      }
     } else {
       results.slack = scanResultUnconfigured('slack');
       results.slack.errors.push('No Slack connection configured. Enable Slack from the Connections panel.');
