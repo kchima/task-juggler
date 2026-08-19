@@ -3,7 +3,7 @@ import { prioritize } from './scoring.js';
 
 const API_BASE = '/api';
 
-let state = { tasks: [], tree: [], counts: {}, selected: new Set(), sources: null, connections: {} };
+let state = { tasks: [], tree: [], counts: {}, selected: new Set(), sources: null, connections: {}, classifier: null };
 
 // ─── Provider metadata ────────────────────────────────────────────────────
 const PROVIDERS = {
@@ -267,6 +267,143 @@ async function handleDisconnect(providerId) {
     render();
   } catch (err) {
     showToast(`Disconnect failed: ${err.message}`, 'error');
+  }
+}
+
+// ─── Classifier (provider + model + classify now) ────────────────────────
+
+async function loadClassifier() {
+  try {
+    const data = await api('/classify/config');
+    state.classifier = data;
+    renderClassifier();
+  } catch {
+    state.classifier = null;
+  }
+}
+
+function renderClassifier() {
+  const c = state.classifier;
+  const container = document.getElementById('classifierContent');
+  if (!container) return;
+  const summary = document.getElementById('classifierSummary');
+  if (!c) { summary.textContent = ''; container.innerHTML = '<div class="conn-unavailable">Classifier unavailable</div>'; return; }
+
+  summary.textContent = c.configured ? `on · ${c.model}` : 'not configured';
+
+  const provider = c.provider;
+  const models = c.models || [];
+  const keySet = provider === 'anthropic' ? c.anthropicConnected : c.openrouterConnected;
+
+  container.innerHTML = `
+    <div class="classifier-row">
+      <span class="source-name">Provider</span>
+      <label class="classifier-pill"><input type="radio" name="classifierProvider" value="openrouter" ${provider === 'openrouter' ? 'checked' : ''} data-classifier-provider-pick="openrouter"> OpenRouter</label>
+      <label class="classifier-pill"><input type="radio" name="classifierProvider" value="anthropic" ${provider === 'anthropic' ? 'checked' : ''} data-classifier-provider-pick="anthropic"> Anthropic</label>
+    </div>
+
+    <div class="classifier-row">
+      <span class="source-name">${provider === 'anthropic' ? 'Anthropic key' : 'OpenRouter key'}</span>
+      <span class="conn-badge ${keySet ? 'connected' : ''}">${keySet ? 'key set' : 'none'}</span>
+      <input type="password" id="classifierKeyInput" placeholder="Paste API key" autocomplete="off">
+      <button class="btn small primary" id="classifierKeySave">Save key</button>
+    </div>
+
+    <div class="classifier-row">
+      <span class="source-name">Model</span>
+      <select id="classifierModelSelect">
+        <option value="">${models.length ? '' : '— load models —'}</option>
+        ${models.map((m) => `<option value="${escapeHtml(m.id)}" ${m.id === c.model ? 'selected' : ''}>${escapeHtml(m.name || m.id)}</option>`).join('')}
+      </select>
+      <button class="btn small" id="classifierLoadModels">Load models</button>
+    </div>
+
+    <div class="classifier-row">
+      <label class="classifier-pill"><input type="checkbox" id="classifierEnabled" ${c.enabled ? 'checked' : ''}> Enable auto-classification (every ~5 min)</label>
+    </div>
+
+    <div class="classifier-row">
+      <button class="btn primary" id="classifierRun">▷ Classify now</button>
+      <span class="conn-hint">Re-judges already-fetched items only — no re-fetch.</span>
+    </div>
+  `;
+}
+
+function wireClassifierEvents() {
+  const container = document.getElementById('classifierContent');
+  if (!container) return;
+  const activeProvider = () => (state.classifier && state.classifier.provider) || 'openrouter';
+
+  container.addEventListener('change', async (e) => {
+    const pick = e.target.closest('[data-classifier-provider-pick]');
+    if (pick) { await handleClassifierProvider(pick.value); return; }
+    const enabled = e.target.closest('#classifierEnabled');
+    if (enabled) { await handleClassifierEnabled(enabled.checked); return; }
+    const model = e.target.closest('#classifierModelSelect');
+    if (model) { await handleClassifierModel(model.value); return; }
+  });
+
+  container.addEventListener('click', async (e) => {
+    const keySave = e.target.closest('#classifierKeySave');
+    if (keySave) { await handleClassifierKeySave(activeProvider()); return; }
+    const loadModels = e.target.closest('#classifierLoadModels');
+    if (loadModels) { await handleClassifierLoadModels(activeProvider()); return; }
+    const runBtn = e.target.closest('#classifierRun');
+    if (runBtn) { await handleClassifyNow(); return; }
+  });
+}
+
+async function handleClassifierProvider(provider) {
+  await api('/classify/settings', { method: 'POST', body: JSON.stringify({ provider }) });
+  await loadClassifier();
+}
+
+async function handleClassifierKeySave(provider) {
+  const input = document.getElementById('classifierKeyInput');
+  if (!input || !input.value.trim()) { showToast('Paste a key first', 'error'); return; }
+  try {
+    await api('/classify/keys', { method: 'POST', body: JSON.stringify({ provider, key: input.value.trim() }) });
+    input.value = '';
+    showToast('Classifier key saved', 'success');
+    await loadClassifier();
+  } catch (err) {
+    showToast(`Key save failed: ${err.message}`, 'error');
+  }
+}
+
+async function handleClassifierLoadModels(provider) {
+  try {
+    await api('/classify/models', { method: 'POST', body: JSON.stringify({ provider }) });
+    await loadClassifier();
+    showToast('Models loaded', 'success');
+  } catch (err) {
+    showToast(`${err.message}`, 'error');
+  }
+}
+
+async function handleClassifierModel(model) {
+  if (!model) return;
+  await api('/classify/settings', { method: 'POST', body: JSON.stringify({ model }) });
+  state.classifier = { ...state.classifier, model };
+}
+
+async function handleClassifierEnabled(enabled) {
+  await api('/classify/settings', { method: 'POST', body: JSON.stringify({ enabled }) });
+  state.classifier = { ...state.classifier, enabled };
+}
+
+async function handleClassifyNow() {
+  const btn = document.getElementById('classifierRun');
+  if (btn) { btn.disabled = true; btn.textContent = '▷ Classifying…'; }
+  try {
+    const res = await api('/classify/run', { method: 'POST', body: JSON.stringify({ limit: 10 }) });
+    const done = res.processed && res.processed.processed;
+    showToast(`Classified ${done ?? 0} item(s)`, 'success');
+    await loadTasks();
+  } catch (err) {
+    showToast(`Classify failed: ${err.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '▷ Classify now'; }
   }
 }
 
@@ -1100,11 +1237,13 @@ async function init() {
   try {
     await loadConnections();
     await loadTasks();
+    await loadClassifier();
   } catch (err) {
     document.getElementById('activeList').innerHTML =
       `<div class="empty-state">Could not connect to server (http://localhost:3000).<br>Make sure the server is running.</div>`;
   }
   setupEventListeners();
+  wireClassifierEvents();
   initAutoScan();
 }
 

@@ -153,6 +153,16 @@ const MIGRATIONS = [
       CREATE INDEX IF NOT EXISTS idx_classification_jobs_source ON classification_jobs(source_type, source_key);
     `);
   },
+  () => {
+    // v4 — simple key/value settings store (classifier prefs, etc.)
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS settings (
+        key        TEXT PRIMARY KEY,
+        value      TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+  },
 ];
 
 /**
@@ -613,4 +623,23 @@ export function getTodayCompletedCostUsd() {
     "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM classification_jobs WHERE state = 'succeeded' AND updated_at >= date('now')",
   ).get();
   return r && typeof r.total === 'number' ? r.total : 0;
+}
+
+// --- Settings key/value store ----------------------------------------------
+
+export function getSetting(key, fallback = null) {
+  try {
+    const r = getDb().prepare('SELECT value FROM settings WHERE key = ?').get(key);
+    return r ? r.value : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+export function setSetting(key, value) {
+  const conn = getDb();
+  conn.prepare(`
+    INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+  `).run(key, String(value));
 }

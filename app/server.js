@@ -17,7 +17,8 @@ import {
 import { scanAllSources, checkMcpCapabilities } from './connector/scanner.js';
 import { ingestAndQueue } from './ingestService.js';
 import { processNextJobs, enqueueDueJobs, markUserFields } from './ai/classification.js';
-import { getAiConfig, isAiConfigured } from './ai/openRouterClient.js';
+import { getAiConfig, isAiConfigured, loadClassifierPrefs, saveClassifierPrefs, saveClassifierKey } from './ai/openRouterClient.js';
+import { fetchAvailableModels } from './ai/modelCatalog.js';
 import { tick as drainScheduler, startScheduler } from './scheduler.js';
 import { McpClient } from './connector/mcpClient.js';
 import { FakeMcpServer } from './connector/fakeMcpServer.js';
@@ -212,6 +213,75 @@ app.get('/api/classify/status', (_req, res) => {
   });
 });
 
+// ─── Classifier settings / models (OpenRouter & Anthropic) ───────────────
+// In-memory model cache per provider, populated by POST /api/classify/models.
+let _modelCache = {};
+
+/**
+ * GET /api/classify/config
+ * Report classifier config + per-provider connectivity + cached models.
+ * Never exposes keys.
+ */
+app.get('/api/classify/config', (_req, res) => {
+  const cfg = getAiConfig();
+  res.json({
+    configured: isAiConfigured(cfg),
+    provider: cfg.provider,
+    model: cfg.model,
+    enabled: cfg.enabled,
+    maxDailyUsd: cfg.maxDailyUsd,
+    openrouterConnected: !!cfg.apiKey,
+    anthropicConnected: !!cfg.anthropicApiKey,
+    models: _modelCache[cfg.provider] || null,
+    pendingJobs: getPendingJobCount(),
+    jobStates: getJobStates(),
+  });
+});
+
+/**
+ * POST /api/classify/keys
+ * Save (or overwrite) a classifier API key for a provider to the Keychain.
+ * Body: { provider: 'openrouter'|'anthropic', key }
+ */
+app.post('/api/classify/keys', (req, res) => {
+  const { provider, key } = req.body || {};
+  if (!provider || !key || !key.trim()) {
+    return res.status(400).json({ error: 'provider and key are required' });
+  }
+  saveClassifierKey(provider, key.trim());
+  res.json({ ok: true, provider, configured: true });
+});
+
+/**
+ * POST /api/classify/models
+ * Fetch the available model list from the provider and cache it.
+ * Body: { provider }
+ */
+app.post('/api/classify/models', async (req, res) => {
+  const provider = (req.body && req.body.provider) || getAiConfig().provider;
+  const cfg = getAiConfig();
+  const key = provider === 'anthropic' ? cfg.anthropicApiKey : cfg.apiKey;
+  if (!key) return res.status(400).json({ error: `No ${provider} key configured for the classifier.` });
+  try {
+    const models = await fetchAvailableModels(provider, key);
+    _modelCache[provider] = models;
+    res.json({ ok: true, provider, models });
+  } catch (err) {
+    res.status(400).json({ error: `Could not fetch ${provider} models: ${err.message}` });
+  }
+});
+
+/**
+ * POST /api/classify/settings
+ * Persist classifier preferences (provider / model / enabled).
+ * Body: { provider?, model?, enabled? }
+ */
+app.post('/api/classify/settings', async (req, res) => {
+  const { provider, model, enabled } = req.body || {};
+  const prefs = await saveClassifierPrefs({ provider, model, enabled });
+  res.json({ ok: true, prefs });
+});
+
 /**
  * POST /api/classify/run
  * Manually enqueue due jobs and process a bounded batch now.
@@ -219,9 +289,9 @@ app.get('/api/classify/status', (_req, res) => {
  */
 app.post('/api/classify/run', async (req, res) => {
   if (!isAiConfigured(getAiConfig())) {
-    return res.status(400).json({ error: 'OpenRouter is not configured (set OPENROUTER_API_KEY).' });
+    return res.status(400).json({ error: 'The classifier is not configured — add a provider key, then pick a model.' });
   }
-  const limit = Math.max(1, Math.min(Number(req.body?.limit) || 1, 20));
+  const limit = Math.max(1, Math.min(Number(req.body?.limit) || 10, 20));
   try {
     const enqueue = await enqueueDueJobs();
     const processed = await processNextJobs({ limit });
@@ -712,8 +782,10 @@ export function startServer(port = PORT) {
 // Allow direct run
 const isMain = process.argv[1] && (process.argv[1] === fileURLToPath(import.meta.url) || process.argv[1].endsWith('/app/server.js'));
 if (isMain) {
-  startServer(PORT).then(() => {
-    // Start the recurring OpenRouter classifier (safe no-op if not configured).
+  startServer(PORT).then(async () => {
+    // Load persisted classifier settings (provider/model/enabled) from SQLite.
+    await loadClassifierPrefs();
+    // Start the recurring classifier (safe no-op if not configured).
     startScheduler();
   });
 }

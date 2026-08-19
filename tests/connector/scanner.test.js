@@ -53,12 +53,21 @@ describe('scanAllSources — no MCP client', () => {
     expect(results.opencode).toBeDefined();
   });
 
-  it('includes helpful error messages about what is needed', async () => {
+  it('does not report unconfigured sources as errors (happy path, not an error)', async () => {
     const results = await scanAllSources(null);
-    // When unconfigured, a helpful message must reference enabling the source.
+    // "Not configured" is the correct state before a user connects — it must not
+    // surface as an error. Errors are reserved for genuine failures.
     if (results.slack.status === 'unconfigured') {
-      expect(results.slack.errors.length).toBeGreaterThan(0);
-      expect(results.slack.errors[0]).toContain('Connections panel');
+      expect(results.slack.errors).toEqual([]);
+    }
+    if (results.devin.status === 'unconfigured') {
+      expect(results.devin.errors).toEqual([]);
+    }
+    if (results.todoist.status === 'unconfigured') {
+      expect(results.todoist.errors).toEqual([]);
+    }
+    if (results.linear.status === 'unconfigured') {
+      expect(results.linear.errors).toEqual([]);
     }
   });
 });

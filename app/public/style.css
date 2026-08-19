@@ -294,6 +294,22 @@ header h1 { font-size: 1.4rem; font-weight: 600; }
 }
 .conn-token-config.hidden { display: none; }
 
+/* Classifier settings */
+.classifier-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 0;
+}
+.classifier-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.8rem;
+}
+.classifier-pill input { margin: 0; }
+
 .conn-token-input {
   width: 100%; padding: 6px 8px; margin-bottom: 6px;
   background: var(--surface); border: 1px solid var(--border);

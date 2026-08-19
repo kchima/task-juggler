@@ -203,7 +203,6 @@ export async function scanAllSources(mcpClient = null, envConfig = {}) {
       }
     } else {
       results.slack = scanResultUnconfigured('slack');
-      results.slack.errors.push('No Slack connection configured. Enable Slack from the Connections panel.');
     }
   }
 
@@ -223,7 +222,6 @@ export async function scanAllSources(mcpClient = null, envConfig = {}) {
       results.linear = scanResultWithError('linear', 'Linear is connected, but the last scan failed. The access token may be expired — reconnect from the Connections panel.');
     } else {
       results.linear = scanResultUnconfigured('linear');
-      results.linear.errors.push('No Linear connection configured. Enable Linear from the Connections panel.');
     }
   }
 
@@ -247,7 +245,11 @@ export async function scanAllSources(mcpClient = null, envConfig = {}) {
         results.todoist = scanResultWithError('todoist', 'Todoist is connected, but the last scan failed. The access token may be expired — reconnect from the Connections panel.');
       } else {
         results.todoist = scanResultUnconfigured('todoist');
-        results.todoist.errors.push('No Todoist connection configured. Enable Todoist from the Connections panel (supports browser OAuth).');
+        // Diagnostic: if a grant was stored but is missing at scan time, this
+        // line is the tell — the connection vanished between connect and scan.
+        console.log('[Scanner] todoist grant present at scan:', !!(
+          getCredential('todoist-mcp-grant') || getCredential('todoist-oauth-grant')
+        ));
       }
     }
   }
@@ -257,7 +259,6 @@ export async function scanAllSources(mcpClient = null, envConfig = {}) {
     results.devin = await scanDevinDirect(direct.devin, process.env.DEVIN_ORG_ID || null);
   } else {
     results.devin = scanResultUnconfigured('devin');
-    results.devin.errors.push('Devin API key not configured. Add a Devin API key (cog_…) in the Connections panel.');
   }
 
   // --- Claude (local session discovery — read-only metadata) ---

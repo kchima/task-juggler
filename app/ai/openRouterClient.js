@@ -1,7 +1,57 @@
-// Low-level OpenRouter client. The API key lives only in the server process
-// environment and is never sent to the browser or persisted to the DB/logs.
+// Low-level classifier client. API keys live only in the server process
+// environment or the macOS Keychain, and are never sent to the browser or
+// persisted to the DB/logs.
+
+import { getCredential, storeCredential } from '../auth/credentialStore.js';
+import { getSetting, setSetting } from '../database.js';
 
 const BASE_URL = 'https://openrouter.ai/api/v1';
+
+// Classifier preferences persisted in the DB (provider / model / enabled) that
+// override environment defaults. Loaded lazily via loadClassifierPrefs() so
+// pure config reads in tests never touch the DB.
+let _prefs = null;
+
+export function getClassifierPrefs() {
+  return _prefs ? { ..._prefs } : null;
+}
+
+/** Load persisted classifier prefs from the DB into the in-memory cache. */
+export async function loadClassifierPrefs() {
+  const provider = getSetting('classifier.provider') || undefined;
+  const model = getSetting('classifier.model') || undefined;
+  const enabledRaw = getSetting('classifier.enabled');
+  const enabled = enabledRaw != null ? enabledRaw !== 'false' : undefined;
+  _prefs = { provider, model, enabled };
+  return getClassifierPrefs();
+}
+
+/** Persist classifier prefs (provider/model/enabled) and update the cache. */
+export async function saveClassifierPrefs(patch = {}) {
+  const base = loadClassifierPrefs() || {};
+  const next = { ...base, ...patch };
+  if (patch.provider !== undefined) setSetting('classifier.provider', patch.provider);
+  if (patch.model !== undefined) setSetting('classifier.model', patch.model);
+  if (patch.enabled !== undefined) setSetting('classifier.enabled', patch.enabled ? 'true' : 'false');
+  _prefs = next;
+  return { ...next };
+}
+
+function classifierKey(provider) {
+  return provider === 'anthropic' ? 'anthropic' : 'openrouter';
+}
+
+export function saveClassifierKey(provider, key) {
+  storeCredential(`classifier-${classifierKey(provider)}-key`, { token: key, storedAt: Date.now() });
+}
+
+function resolveClassifierKey(provider) {
+  try {
+    const stored = getCredential(`classifier-${classifierKey(provider)}-key`);
+    if (stored && stored.token) return stored.token;
+  } catch {}
+  return process.env[provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENROUTER_API_KEY'] || null;
+}
 
 export class OpenRouterError extends Error {
   constructor(message, { code, retriable }) {
@@ -20,18 +70,23 @@ export class OpenRouterError extends Error {
  * the frontend — the frontend may only request an app-level action.
  */
 export function getAiConfig() {
-  const provider = (process.env.TASK_JUGGLER_CLASSIFIER_PROVIDER || 'openrouter').toLowerCase();
-  const primary = process.env.TASK_JUGGLER_CLASSIFIER_MODEL
-    || (provider === 'anthropic' ? 'claude-sonnet-4-5-20250929' : 'deepseek/deepseek-v4-flash-0731');
+  const prefs = getClassifierPrefs() || {};
+  const provider = (prefs.provider || process.env.TASK_JUGGLER_CLASSIFIER_PROVIDER || 'openrouter').toLowerCase();
+  const defaultModel = provider === 'anthropic'
+    ? 'claude-sonnet-4-5-20250929'
+    : 'deepseek/deepseek-v4-flash-0731';
+  const model = prefs.model || process.env.TASK_JUGGLER_CLASSIFIER_MODEL || defaultModel;
   const configuredFallbacks = (process.env.TASK_JUGGLER_CLASSIFIER_FALLBACKS || '')
     .split(',').map((s) => s.trim()).filter(Boolean);
-  const enabled = (process.env.TASK_JUGGLER_AI_ENABLED || 'true').toLowerCase() !== 'false';
+  const enabled = prefs.enabled !== undefined
+    ? prefs.enabled
+    : (process.env.TASK_JUGGLER_AI_ENABLED || 'true').toLowerCase() !== 'false';
   return {
     provider,
-    apiKey: process.env.OPENROUTER_API_KEY || null,
-    anthropicApiKey: process.env.ANTHROPIC_API_KEY || null,
+    apiKey: resolveClassifierKey('openrouter'),
+    anthropicApiKey: resolveClassifierKey('anthropic'),
     enabled,
-    model: primary,
+    model,
     fallbacks: configuredFallbacks,
     maxDailyUsd: Number(process.env.TASK_JUGGLER_AI_MAX_DAILY_USD || 0.25),
     maxTokens: Number(process.env.TASK_JUGGLER_AI_MAX_TOKENS || 400),
