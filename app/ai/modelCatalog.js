@@ -43,8 +43,15 @@ export async function fetchAvailableModels(provider, apiKey) {
       .filter((m) => typeof m.id === 'string' && !m.id.includes('-latest'));
   }
 
-  // Deterministic, easy-to-browse order.
-  return models.sort((a, b) => a.id.localeCompare(b.id));
+// Deterministic, easy-to-browse order. Uses a natural sort that treats version
+// segments numerically, so gpt-5 < gpt-5.1 < gpt-5.2 and batch variants group
+// next to their base model instead of being scattered lexically.
+return models.sort((a, b) => naturalCompare(a.id, b.id));
+
+/** @private */
+function naturalCompare(a, b) {
+  return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
+}
 }
 
 /**

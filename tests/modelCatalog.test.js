@@ -27,17 +27,21 @@ describe('model catalog ordering + defaults', () => {
     expect(pickModelPreference('unknown', list)).toBe('openai/gpt-5.6-luna-pro');
   });
 
-  it('fetchAvailableModels sorts alphabetically by id (via mocked fetch)', async () => {
+  it('fetchAvailableModels sorts with natural version ordering (via mocked fetch)', async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () => ({
-      ok: true,
-      json: async () => ({ data: TEST_MODELS }),
-    });
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ data: TEST_MODELS }) });
     try {
       const sorted = await fetchAvailableModels('openrouter', 'sk-test');
       const ids = sorted.map((m) => m.id);
-      expect(ids).toEqual([...ids].sort());
+      // DeepSeek V4 Flash 0731 belongs in the deepseek/ group, not first overall.
+      expect(ids.indexOf('deepseek/deepseek-v4-flash-0731')).toBeGreaterThan(0);
+      // z-ai sorts after openai (alphabetical), and anthropic sorts first.
       expect(ids[0]).toBe('anthropic/claude-opus-5');
+      expect(ids.indexOf('z-ai/glm-5.3')).toBeGreaterThan(ids.indexOf('openai/gpt-5.6-luna-pro'));
+      // Every pair is naturally ordered.
+      for (let i = 0; i < ids.length - 1; i++) {
+        expect(ids[i].localeCompare(ids[i + 1], undefined, { numeric: true, sensitivity: 'base' })).toBeLessThanOrEqual(0);
+      }
     } finally {
       globalThis.fetch = originalFetch;
     }
