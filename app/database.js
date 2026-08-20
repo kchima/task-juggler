@@ -606,6 +606,20 @@ export function getPendingJobCount() {
   return r.c;
 }
 
+/**
+ * Release jobs whose lease expired (crashed/failed runs leave them 'leased').
+ * Returns the number reset. Called before claiming so a failed key doesn't
+ * permanently wedge the queue.
+ */
+export function resetStaleLeases({ leaseSeconds = 120, now = new Date() } = {}) {
+  const conn = getDb();
+  const cutoff = new Date(now.getTime() - leaseSeconds * 1000).toISOString();
+  const r = conn.prepare(
+    "UPDATE classification_jobs SET state = 'pending', lease_expires_at = NULL, updated_at = datetime('now') WHERE state = 'leased' AND (lease_expires_at IS NULL OR lease_expires_at <= ?)"
+  ).run(cutoff);
+  return r.changes;
+}
+
 export function getJobStates() {
   const conn = getDb();
   return conn.prepare('SELECT state, COUNT(*) AS count FROM classification_jobs GROUP BY state').all()

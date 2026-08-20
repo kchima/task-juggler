@@ -406,9 +406,21 @@ async function handleClassifyNow() {
   if (btn) { btn.disabled = true; btn.textContent = '▷ Classifying…'; }
   try {
     const res = await api('/classify/run', { method: 'POST', body: JSON.stringify({ limit: 10 }) });
-    const done = res.processed && res.processed.processed;
-    showToast(`Classified ${done ?? 0} item(s)`, 'success');
-    await loadTasks();
+    const processed = res.processed || {};
+    const outcomes = processed.outcomes || [];
+    const ok = outcomes.filter((o) => o.status === 'ok').length;
+    const failed = outcomes.filter((o) => o.status === 'failed').length;
+    const errMsg = outcomes.find((o) => o.error)?.error || res.failureHint;
+    if (ok > 0) {
+      showToast(`Classified ${ok} item(s)${failed ? `, ${failed} failed` : ''}`, 'success');
+      await loadTasks();
+    } else if (failed > 0 && errMsg) {
+      showToast(`Classification failed (${failed}): ${errMsg}`, 'error');
+    } else if (failed > 0) {
+      showToast(`${failed} item(s) failed to classify`, 'error');
+    } else {
+      showToast(`No items to classify (${outcomes.length} attempted)`, 'info');
+    }
   } catch (err) {
     showToast(`Classify failed: ${err.message}`, 'error');
   } finally {

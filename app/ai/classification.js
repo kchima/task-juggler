@@ -6,7 +6,7 @@ import crypto from 'crypto';
 import {
   getSourceItemByKey, getAllSourceItems, getTaskById, createTask, updateTask,
   claimJobs, completeJob, failJob, enqueueClassificationJob, setHumanFields,
-  linkSourceItemToTask,
+  linkSourceItemToTask, resetStaleLeases,
 } from '../database.js';
 import { classifyItem, getAiConfig, isAiConfigured } from './openRouterClient.js';
 
@@ -164,6 +164,8 @@ export async function processNextJobs({ limit = 1, config = getAiConfig(), now }
   if (!isAiConfigured(config)) {
     return { ok: false, reason: 'not_configured', processed: 0 };
   }
+  // Recover jobs wedged 'leased' by a previous crashed/failed run.
+  try { resetStaleLeases(); } catch {}
   const jobs = claimJobs(limit, { now });
   const outcomes = [];
   for (const job of jobs) {

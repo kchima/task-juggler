@@ -299,7 +299,11 @@ app.post('/api/classify/run', async (req, res) => {
     // Manual classify works regardless of the auto-enable toggle.
     const enqueue = await enqueueDueJobs({ respectEnabled: false });
     const processed = await processNextJobs({ limit, config: cfg });
-    res.json({ enqueue, processed });
+    // The first failure often identifies a bad key (e.g. an OpenRouter
+    // management/provisioning key, which can list models but cannot run chat).
+    const failed = (processed.outcomes || []).filter((o) => o.status === 'failed');
+    const hint = failed[0] && failed[0].error ? failed[0].error : null;
+    res.json({ enqueue, processed, failureHint: hint });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
