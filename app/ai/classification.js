@@ -216,15 +216,16 @@ async function runSingleJob(job, config) {
  * hash changed since its last classified version (or that has never been
  * classified). Idempotent via the job uniqueness constraint.
  */
-export async function enqueueDueJobs() {
+export async function enqueueDueJobs({ respectEnabled = true } = {}) {
   const config = getAiConfig();
   if (!isAiConfigured(config)) return { ok: false, reason: 'not_configured', enqueued: 0 };
+  // When auto-classification is disabled, don't keep accumulating a queue on
+  // every scan — but manual "Classify now" may bypass this via respectEnabled=false.
+  if (respectEnabled && !config.enabled) return { ok: false, reason: 'disabled', enqueued: 0 };
 
   const items = getAllSourceItems({ includeDismissed: false });
   let enqueued = 0;
   for (const item of items) {
-    // Only classify items that map to a status-check; no_action/completed
-    // handled by the classifier itself.
     const { created } = enqueueClassificationJob({
       sourceType: item.sourceType,
       sourceKey: item.key,

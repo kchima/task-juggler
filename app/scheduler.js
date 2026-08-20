@@ -22,6 +22,7 @@ const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
  */
 export async function tick({ config = getAiConfig(), batchSize } = {}) {
   if (_busy) return { ok: false, reason: 'busy', processed: 0 };
+  if (!config.enabled) return { ok: false, reason: 'disabled', processed: 0 };
   if (!isAiConfigured(config)) return { ok: false, reason: 'not_configured', processed: 0 };
 
   _busy = true;

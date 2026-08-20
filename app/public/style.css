@@ -310,6 +310,17 @@ header h1 { font-size: 1.4rem; font-weight: 600; }
 }
 .classifier-pill input { margin: 0; }
 
+/* In-app setup guides (e.g. Devin) */
+.source-setup-guide { margin-top: 6px; }
+.conn-setup-summary {
+  cursor: pointer;
+  font-size: 0.75rem;
+  opacity: 0.8;
+  user-select: none;
+}
+.conn-setup-summary:hover { text-decoration: underline; }
+.source-setup-guide .setup-guide { margin: 6px 0 0 0; padding-left: 18px; font-size: 0.78rem; }
+
 .conn-token-input {
   width: 100%; padding: 6px 8px; margin-bottom: 6px;
   background: var(--surface); border: 1px solid var(--border);

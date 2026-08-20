@@ -223,6 +223,8 @@ let _modelCache = {};
  * Never exposes keys.
  */
 app.get('/api/classify/config', (_req, res) => {
+  // Re-read persisted prefs from the DB so the UI never sees a stale cache.
+  try { loadClassifierPrefs(); } catch {}
   const cfg = getAiConfig();
   res.json({
     configured: isAiConfigured(cfg),
@@ -288,13 +290,15 @@ app.post('/api/classify/settings', async (req, res) => {
  * Body: { limit? }
  */
 app.post('/api/classify/run', async (req, res) => {
-  if (!isAiConfigured(getAiConfig())) {
-    return res.status(400).json({ error: 'The classifier is not configured — add a provider key, then pick a model.' });
+  const cfg = getAiConfig();
+  if (!isAiConfigured(cfg)) {
+    return res.status(400).json({ error: `The classifier has no key for provider "${cfg.provider}". Add one in the Classifier panel.` });
   }
   const limit = Math.max(1, Math.min(Number(req.body?.limit) || 10, 20));
   try {
-    const enqueue = await enqueueDueJobs();
-    const processed = await processNextJobs({ limit });
+    // Manual classify works regardless of the auto-enable toggle.
+    const enqueue = await enqueueDueJobs({ respectEnabled: false });
+    const processed = await processNextJobs({ limit, config: cfg });
     res.json({ enqueue, processed });
   } catch (err) {
     res.status(500).json({ error: err.message });

@@ -46,7 +46,14 @@ const PROVIDERS = {
     supportsToken: true,
     description: 'Active sessions',
     tokenLabel: 'Devin service-user API key',
-    tokenHint: 'cog-… (starts with cog_)',
+    tokenHint: 'cog_…',
+    setupGuide: [
+      'Sign in at <a href="https://app.devin.ai" target="_blank" rel="noopener">app.devin.ai</a> → <strong>Settings → Service users</strong>.',
+      'Create a service user and assign a role with the <strong>ViewOrgSessions</strong> permission.',
+      'On that service user, click <strong>Generate API key</strong>. It starts with <code>cog_</code> and is shown <strong>only once</strong> — copy it now.',
+      'Paste the key below and click <strong>Save</strong>.',
+      'Your organization ID is optional — Task Juggler auto-discovers it; set <code>DEVIN_ORG_ID</code> only if auto-discovery fails.',
+    ],
   },
   claude: {
     id: 'claude',
@@ -289,7 +296,9 @@ function renderClassifier() {
   const summary = document.getElementById('classifierSummary');
   if (!c) { summary.textContent = ''; container.innerHTML = '<div class="conn-unavailable">Classifier unavailable</div>'; return; }
 
-  summary.textContent = c.configured ? `on · ${c.model}` : 'not configured';
+  summary.textContent = c.configured
+    ? `${c.enabled ? 'on' : 'configured · auto off'} · ${c.model}`
+    : 'not configured';
 
   const provider = c.provider;
   const models = c.models || [];
@@ -587,7 +596,8 @@ function renderSourceEntry(provider, conn, scanResult) {
       `;
     }
   } else if (hasToken) {
-    // Non-OAuth token-based (Devin)
+    // Non-OAuth token-based (Devin, more in the future)
+    const setupGuide = provider.setupGuide || [];
     actionHtml = `
       <div class="conn-status">
         <button class="btn small conn-token-toggle" data-token-toggle="${provider.id}">API Token</button>
@@ -596,6 +606,15 @@ function renderSourceEntry(provider, conn, scanResult) {
         <input type="password" class="conn-token-input" data-token-input="${provider.id}" placeholder="${provider.tokenLabel} (${provider.tokenHint})">
         <button class="btn small conn-token-save" data-token-save="${provider.id}">Save</button>
       </div>
+      ${setupGuide.length ? `
+        <div class="source-setup-guide">
+          <details>
+            <summary class="conn-setup-summary">How to get a ${provider.name} API key</summary>
+            <ol class="setup-guide">
+              ${setupGuide.map((s) => `<li>${s}</li>`).join('')}
+            </ol>
+          </details>
+        </div>` : ''}
     `;
   } else if (provider.id === 'claude' || provider.id === 'opencode') {
     actionHtml = `

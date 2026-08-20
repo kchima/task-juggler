@@ -17,7 +17,7 @@ export function getClassifierPrefs() {
 }
 
 /** Load persisted classifier prefs from the DB into the in-memory cache. */
-export async function loadClassifierPrefs() {
+export function loadClassifierPrefs() {
   const provider = getSetting('classifier.provider') || undefined;
   const model = getSetting('classifier.model') || undefined;
   const enabledRaw = getSetting('classifier.enabled');
@@ -28,13 +28,12 @@ export async function loadClassifierPrefs() {
 
 /** Persist classifier prefs (provider/model/enabled) and update the cache. */
 export async function saveClassifierPrefs(patch = {}) {
-  const base = loadClassifierPrefs() || {};
-  const next = { ...base, ...patch };
+  // Always re-read from the DB so saves are idempotent and never diverge.
+  loadClassifierPrefs();
   if (patch.provider !== undefined) setSetting('classifier.provider', patch.provider);
   if (patch.model !== undefined) setSetting('classifier.model', patch.model);
   if (patch.enabled !== undefined) setSetting('classifier.enabled', patch.enabled ? 'true' : 'false');
-  _prefs = next;
-  return { ...next };
+  return loadClassifierPrefs();
 }
 
 function classifierKey(provider) {
@@ -95,8 +94,12 @@ export function getAiConfig() {
   };
 }
 
+/**
+ * Is the classifier usable? True when the selected provider has a key.
+ * Does NOT require `enabled` — "configured" and "auto-enabled" are separate
+ * states, so the UI can say "configured (auto off)" instead of "not configured".
+ */
 export function isAiConfigured(config = getAiConfig()) {
-  if (!config.enabled) return false;
   if (config.provider === 'anthropic') return !!config.anthropicApiKey;
   return !!config.apiKey;
 }

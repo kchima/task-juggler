@@ -1,5 +1,8 @@
 // Tests for the Anthropic classifier provider and provider-aware config.
 import { describe, it, expect, afterEach, vi } from 'vitest';
+
+// Hermetic: never read the developer's real Keychain during tests.
+vi.mock("../app/auth/credentialStore.js", () => ({ getCredential: () => null, storeCredential: () => {}, deleteCredential: () => {}, listCredentials: () => [] }));
 import { parseAnthropicResponse } from '../app/ai/anthropicClient.js';
 import { getAiConfig, isAiConfigured } from '../app/ai/openRouterClient.js';
 

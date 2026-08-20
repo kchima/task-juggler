@@ -1,5 +1,8 @@
 // Tests for the classification scheduler + daily budget guardrail.
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+// Hermetic: never read the developer's real Keychain during tests.
+vi.mock("../app/auth/credentialStore.js", () => ({ getCredential: () => null, storeCredential: () => {}, deleteCredential: () => {}, listCredentials: () => [] }));
 import {
   initTestDb, closeDb, enqueueClassificationJob, completeJob,
   getTodayCompletedCostUsd,
