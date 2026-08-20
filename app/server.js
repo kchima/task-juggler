@@ -789,6 +789,14 @@ if (isMain) {
   startServer(PORT).then(async () => {
     // Load persisted classifier settings (provider/model/enabled) from SQLite.
     await loadClassifierPrefs();
+    // Prime the model cache so the dropdown is populated on first load.
+    const cfg = getAiConfig();
+    if (isAiConfigured(cfg)) {
+      try {
+        const key = cfg.provider === 'anthropic' ? cfg.anthropicApiKey : cfg.apiKey;
+        _modelCache[cfg.provider] = await fetchAvailableModels(cfg.provider, key);
+      } catch {}
+    }
     // Start the recurring classifier (safe no-op if not configured).
     startScheduler();
   });
