@@ -170,159 +170,34 @@ export async function applyVerdict(sourceItem, verdict) {
 }
 
 /**
- * Process a bounded number of pending classification jobs, grouped by source
- * and batched per OpenRouter call (far more cost-efficient and faster than one
- * call per item). Items in one batch share a single system prompt + one
- * structured-array response. On any batch parse failure, it is split and
- * retried, so one bad item never blocks the rest.
- *
- * Intended to be called by the server scheduler or a manual "classify now"
- * endpoint. Concurrency is 1 per call (worker loop).
+ * Process a bounded number of pending classification jobs. Uses reliable
+ * per-item calls (DeepSeek cannot produce structured-array batch output
+ * reliably), but runs a small bounded concurrency to clear the backlog faster
+ * and still amortize connection overhead.
  */
-export async function processNextJobs({ limit = 1, config = getAiConfig(), now, batchSize = 12 } = {}) {
+export async function processNextJobs({ limit = 5, config = getAiConfig(), now, concurrency = 3 } = {}) {
   if (!isAiConfigured(config)) {
     return { ok: false, reason: 'not_configured', processed: 0 };
   }
   // Recover jobs wedged 'leased' by a previous crashed/failed run.
   try { resetStaleLeases(); } catch {}
 
-  const jobs = claimJobs(Math.max(limit, batchSize), { now });
-  if (jobs.length === 0) return { ok: true, processed: 0, outcomes: [] };
-
-  // Group by source so one source's payload shape is kept together.
-  const bySource = new Map();
-  for (const job of jobs) {
-    if (!bySource.has(job.sourceType)) bySource.set(job.sourceType, []);
-    const sourceItem = getSourceItemByKey(job.sourceKey);
-    if (sourceItem) bySource.get(job.sourceType).push({ job, sourceItem });
-  }
-
+  const jobs = claimJobs(limit, { now });
   const outcomes = [];
-  for (const [sourceType, group] of bySource) {
-    const sourceOutcomes = await classifyGroup(sourceType, group, config, { batchSize });
-    outcomes.push(...sourceOutcomes);
+  let idx = 0;
+
+  async function worker() {
+    while (idx < jobs.length) {
+      const job = jobs[idx++];
+      const result = await runSingleJob(job, config);
+      outcomes.push(result);
+    }
   }
+
+  const workers = Array.from({ length: Math.max(1, Math.min(concurrency, jobs.length)) }, () => worker());
+  await Promise.all(workers);
+
   return { ok: true, processed: outcomes.length, outcomes };
-}
-
-/** @private */
-async function classifyGroup(sourceType, group, config, { batchSize = 12 }) {
-  // Single item — same path as before.
-  if (group.length === 1) {
-    return [await runSingleJob(group[0].job, config)];
-  }
-
-  const outcomes = [];
-  // Batch in chunks; a chunk that fails to parse is split and retried.
-  const chunks = [];
-  for (let i = 0; i < group.length; i += batchSize) chunks.push(group.slice(i, i + batchSize));
-
-  for (const chunk of chunks) {
-    try {
-      outcomes.push(...await runBatchJobs(chunk, config, sourceType));
-    } catch (err) {
-      // Split the failed chunk in half and retry each half individually.
-      if (chunk.length === 1) {
-        outcomes.push({ jobId: chunk[0].job.id, status: 'failed', error: err.message });
-      } else {
-        const mid = Math.floor(chunk.length / 2);
-        outcomes.push(...await classifyGroup(sourceType, chunk.slice(0, mid), config, { batchSize }));
-        outcomes.push(...await classifyGroup(sourceType, chunk.slice(mid), config, { batchSize }));
-      }
-    }
-  }
-  return outcomes;
-}
-
-/**
- * Run one batch of same-source items against a single OpenRouter call that
- * returns an array of verdicts keyed by item key, then apply each verdict.
- */
-async function runBatchJobs(entries, config, sourceType) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
-  try {
-    const system = [
-      buildSystemPrompt(),
-      'You are classifying MULTIPLE items from ONE source at once.',
-      'Respond with a SINGLE JSON ARRAY, one object per item, each with the same schema',
-      'plus a "key" field equal to the exact item key from the input.',
-      'Return exactly one object per provided item, in any order.',
-    ].join('\n');
-
-    const prompt = entries.map(({ job, sourceItem }) => (
-      `ITEM KEY: ${job.sourceKey}\n` + buildUserPrompt(sourceItem)
-    )).join('\n\n---\n\n');
-
-    const result = await classifyItem({
-      config,
-      model: config.model,
-      system,
-      prompt,
-      schema: {
-        name: `${sourceType}_batch_verdicts`,
-        schema: {
-          type: 'array',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            required: ['key', ...CLASSIFICATION_SCHEMA.schema.required],
-            properties: { key: { type: 'string' }, ...CLASSIFICATION_SCHEMA.schema.properties },
-          },
-        },
-      },
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-
-    const parsed = parseBatchVerdicts(result.content, config.maxTokens || 4096);
-    const byKey = new Map(parsed.map((p) => [p.key, p]));
-
-    const outcomes = [];
-    for (const { job, sourceItem } of entries) {
-      const verdict = byKey.get(job.sourceKey);
-      if (!verdict) {
-        // Item omitted from response — do not watermark; treat as failed so it retries.
-        outcomes.push({ jobId: job.id, status: 'failed', error: 'item omitted from batch response' });
-        continue;
-      }
-      try {
-        const applied = await applyVerdict(sourceItem, verdict);
-        completeJob(job.id, {
-          verdict,
-          servedModel: result.model,
-          generationId: result.generationId,
-          inputTokens: result.usage && result.usage.inputTokens,
-          outputTokens: result.usage && result.usage.outputTokens,
-          costUsd: result.costUsd,
-        });
-        outcomes.push({ jobId: job.id, status: 'ok', verdict, applied, costUsd: result.costUsd });
-      } catch (err) {
-        outcomes.push({ jobId: job.id, status: 'failed', error: err.message });
-      }
-    }
-    return outcomes;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/** Parse a batch response: a JSON array of verdict objects each with a `key`. */
-function parseBatchVerdicts(content, maxLen) {
-  const text = String(content || '').slice(0, maxLen);
-  let parsed;
-  try {
-    parsed = JSON.parse(stripCodeFence(text));
-  } catch {
-    throw new Error('Batch verdict was not valid JSON');
-  }
-  if (!Array.isArray(parsed)) throw new Error('Batch verdict was not an array');
-  return parsed.filter((p) => p && typeof p === 'object' && typeof p.key === 'string');
-}
-
-/** @private */
-function stripCodeFence(text) {
-  return text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
 }
 
 /** @private */
