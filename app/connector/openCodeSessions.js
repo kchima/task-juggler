@@ -125,6 +125,9 @@ export function openCodeItems({ dbPath, limit } = {}) {
       // Everything the classifier needs to judge whether this todo is active
       // work needing the user: the todo text, its explicit state, and context.
       title: s.title,
+      // Top-level timestamp so ingest sets sourceUpdatedAt and the 24h
+      // temporal gate works for OpenCode too.
+      modifiedAt: s.modifiedAt,
       raw: {
         todoText: s.title,
         todoStatus: s.status,
