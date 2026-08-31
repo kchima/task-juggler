@@ -132,19 +132,25 @@ async function classifyWithOpenRouter({ config = getAiConfig(), model, system, p
       role: 'user',
       content: prompt,
     }],
-    response_format: {
-      type: 'json_schema',
-      json_schema: {
-        name: schema.name,
-        strict: true,
-        schema: schema.schema,
-      },
-    },
     provider: {
-      require_parameters: true,
+      require_parameters: false, // relaxed: models like DeepSeek can't do strict-array structured output
       data_collection: config.dataCollectionDeny ? 'deny' : undefined,
     },
   };
+  // Only request strict JSON-schema output for SINGLE-OBJECT schemas. Array
+  // schemas (batch) are not reliably supported by DeepSeek/OpenRouter's
+  // response_format, so for arrays we rely on prompt instructions + lenient
+  // parsing instead (sending a strict-array schema caused empty `{}` hangs).
+  const isObjectSchema = schema && schema.schema && schema.schema.type === 'object';
+  if (isObjectSchema) {
+    payload.response_format = {
+      type: 'json_schema',
+      json_schema: { name: schema.name, strict: true, schema: schema.schema },
+    };
+  } else {
+    // For array/non-object schemas, strongly instruct JSON-only output.
+    payload.messages[0].content = [system, 'Return ONLY valid JSON. No prose, no markdown fences.'].join('\n');
+  }
   if (!payload.provider.data_collection) delete payload.provider.data_collection;
 
   const url = `${BASE_URL}/chat/completions`;
