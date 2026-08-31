@@ -295,10 +295,11 @@ export async function enqueueDueJobs({ respectEnabled = true } = {}) {
   const NOW = Date.now();
   const RECENT_MS = 24 * 60 * 60 * 1000;
   for (const item of items) {
-    // Temporal rule: only queue items whose last activity is within 24h. Stale
-    // source_items from before the 24h gate existed must not become candidates.
+    // Temporal rule: only queue items whose last activity is within 24h. Items
+    // with NO timestamp can't be proven recent — skip them too, so stale legacy
+    // source_items (ingested before the 24h gate) never become candidates.
     const ts = item.sourceUpdatedAt;
-    if (ts && (NOW - new Date(ts).getTime()) > RECENT_MS) { skippedOld++; continue; }
+    if (!ts || (NOW - new Date(ts).getTime()) > RECENT_MS) { skippedOld++; continue; }
     const res = enqueueClassificationJob({
       sourceType: item.sourceType,
       sourceKey: item.key,
