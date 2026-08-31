@@ -5,11 +5,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 vi.mock("../app/auth/credentialStore.js", () => ({ getCredential: () => null, storeCredential: () => {}, deleteCredential: () => {}, listCredentials: () => [] }));
 import {
   initTestDb, closeDb, upsertSourceItem, getAllSourceItems, getTaskById,
+  completeJob, enqueueClassificationJob,
 } from '../app/database.js';
 import { ingestScanResults, normalizeItem, contentHash } from '../app/ingestService.js';
 import {
-  parseVerdict, applyVerdict, buildSystemPrompt, buildUserPrompt, enqueueDueJobs,
-  processNextJobs, markUserFields, CLASSIFICATION_SCHEMA,
+  parseVerdict, applyVerdict, buildSystemPrompt, buildUserPrompt, buildUserPromptWithPrior,
+  enqueueDueJobs, processNextJobs, markUserFields, CLASSIFICATION_SCHEMA,
 } from '../app/ai/classification.js';
 
 describe('ingestService', () => {
@@ -91,5 +92,25 @@ describe('classification', () => {
     expect(without.enqueued).toBe(0);
     const processed = await processNextJobs({ config: { enabled: false, apiKey: null }, now: new Date() });
     expect(processed.ok).toBe(false);
+  });
+
+  it('builds an incremental prompt with prior verdict when content changed', async () => {
+    // First, judge a source item at hash A and mark it succeeded.
+    upsertSourceItem({ sourceType: 'slack', key: 'slack:C1:1', title: 'Old thread', contentHash: 'hashA' });
+    enqueueClassificationJob({ sourceType: 'slack', sourceKey: 'slack:C1:1', contentHash: 'hashA' });
+    // (complete the job with a verdict via the DB directly — prior verdict is read from succeeded jobs)
+    const priorVerdict = { actionable: true, status: 'in_progress', ballInUsersCourt: true, summary: 'Old summary', reason: 'old context' };
+    const job = enqueueClassificationJob({ sourceType: 'slack', sourceKey: 'slack:C1:1', contentHash: 'hashA' });
+    completeJob(job.job.id, { verdict: priorVerdict });
+
+    // Now the item's content changed -> new hash.
+    const item = { sourceType: 'slack', key: 'slack:C1:1', title: 'Thread with NEW reply', contentHash: 'hashB', status: null, description: '', priority: null, raw: { messages: 'new reply body' } };
+    const prompt = buildUserPromptWithPrior(item, 'hashB');
+    // Should include the current content AND the prior verdict, but NOT resend the whole old history.
+    expect(prompt).toContain('Thread with NEW reply');
+    expect(prompt).toContain('new reply body');
+    expect(prompt).toMatch(/PREVIOUS VERDICT/i);
+    expect(prompt).toContain('Old summary');
+    expect(prompt).not.toMatch(/Old thread/); // old title/history is not resent — only the compact prior verdict
   });
 });

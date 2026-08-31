@@ -610,6 +610,24 @@ export function getPendingJobCount() {
 }
 
 /**
+ * Return the most recent SUCCEEDED verdict for a source key whose content hash
+ * differs from `currentHash` (i.e. the last judgment before this content
+ * version). Used to give the classifier prior context so reclassification is
+ * incremental ("you said X before; here's what changed") instead of from scratch.
+ */
+export function getPriorVerdict(sourceKey, currentHash) {
+  const conn = getDb();
+  const row = conn.prepare(`
+    SELECT content_hash, verdict FROM classification_jobs
+    WHERE source_key = ? AND state = 'succeeded' AND content_hash <> ?
+    ORDER BY created_at DESC LIMIT 1
+  `).get(sourceKey, currentHash || '');
+  if (!row || !row.verdict) return null;
+  try { return { contentHash: row.content_hash, verdict: JSON.parse(row.verdict) }; }
+  catch { return null; }
+}
+
+/**
  * Release jobs whose lease expired (crashed/failed runs leave them 'leased').
  * Returns the number reset. Called before claiming so a failed key doesn't
  * permanently wedge the queue.

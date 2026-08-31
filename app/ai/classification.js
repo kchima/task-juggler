@@ -6,15 +6,15 @@ import crypto from 'crypto';
 import {
   getSourceItemByKey, getAllSourceItems, getTaskById, createTask, updateTask,
   claimJobs, completeJob, failJob, enqueueClassificationJob, setHumanFields,
-  linkSourceItemToTask, resetStaleLeases,
+  linkSourceItemToTask, resetStaleLeases, getPriorVerdict,
 } from '../database.js';
 import { classifyItem, getAiConfig, isAiConfigured } from './openRouterClient.js';
 
 export const CLASSIFIER_POLICY_VERSION = 1;
-// Bumped because the system/user prompts changed significantly (more context +
-// less conservative actionable bias). Job uniqueness includes prompt_version,
-// so bumping forces a fresh judgment of already-classified items.
-export const CLASSIFIER_PROMPT_VERSION = 2;
+// Bumped because the prompts changed: incremental prior-verdict context was
+// added, so previously judged items should be re-evaluated against the new
+// prompt. Job uniqueness includes prompt_version, so bumping forces refresh.
+export const CLASSIFIER_PROMPT_VERSION = 3;
 
 export const STATUS_INTERNAL = {
   not_started: 'not_started',
@@ -87,6 +87,32 @@ export function buildUserPrompt(sourceItem) {
     if (s) lines.push(`Raw context: ${s.slice(0, 2000)}`);
   }
   return lines.filter(Boolean).join('\n');
+}
+
+/**
+ * Like buildUserPrompt but, when this item content has changed since a prior
+ * successful judgment, appends a compact "previous verdict" so the model can
+ * confirm-or-update incrementally rather than re-judging from scratch. This is
+ * the "send the new message to the existing thread" pattern: we pass the prior
+ * conclusion + the current state, not the entire history verbatim.
+ */
+export function buildUserPromptWithPrior(sourceItem, currentHash) {
+  const base = buildUserPrompt(sourceItem);
+  let prior;
+  try {
+    prior = getPriorVerdict(sourceItem.key, currentHash);
+  } catch {
+    prior = null;
+  }
+  if (!prior || !prior.verdict) return base;
+  const v = prior.verdict;
+  const compact = [
+    'PREVIOUS VERDICT (from an earlier version of this item — content has since changed):',
+    `  actionable: ${v.actionable} | status: ${v.status} | ballInUsersCourt: ${v.ballInUsersCourt}`,
+    v.summary ? `  summary: ${v.summary}` : null,
+    v.reason ? `  reason: ${v.reason}` : null,
+  ].filter(Boolean).join('\n');
+  return `${base}\n\n${compact}\n\nRe-evaluate based on the CURRENT content above. If the situation is unchanged, keep the prior verdict; if the changed content is new/more decisive, update it.`;
 }
 
 /**
@@ -214,7 +240,7 @@ async function runSingleJob(job, config) {
       config,
       model: config.model,
       system: buildSystemPrompt(),
-      prompt: buildUserPrompt(sourceItem),
+      prompt: buildUserPromptWithPrior(sourceItem, job.contentHash),
       schema: { name: CLASSIFICATION_SCHEMA.name, schema: CLASSIFICATION_SCHEMA.schema },
       signal: controller.signal,
     });
