@@ -222,11 +222,16 @@ export async function scanSlackDirect(botToken) {
 
     // DMs + threads modified in the last 24h. Slack's `after:` is date-granular,
     // so use today's date as the floor, plus `in:im` to target direct messages.
-    const today = new Date().toISOString().slice(0, 10);
+    // Pull DMs + threads, then enforce a hard 24h "latest-message" window.
+    // Slack's search `after:` is date-granular, so we query a slightly wider
+    // date range but filter strictly on each thread's latest message timestamp
+    // to guarantee only threads with activity in the last 24h survive.
+    const CUTOFF_MS = Date.now() - 24 * 60 * 60 * 1000;
+    const twoDaysAgo = new Date(CUTOFF_MS - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     const queries = [
-      `is:thread in:im after:${today}`,
-      `is:thread to:me after:${today}`,
-      `is:thread from:me after:${today}`,
+      `is:thread in:im after:${twoDaysAgo}`,
+      `is:thread to:me after:${twoDaysAgo}`,
+      `is:thread from:me after:${twoDaysAgo}`,
     ];
     const byKey = new Map();
 
@@ -234,7 +239,7 @@ export async function scanSlackDirect(botToken) {
       try {
         // search.messages requires FORM-ENCODED params — a JSON body is rejected
         // with invalid_arguments + "missing required field: query".
-        const searchResp = await postFormUrl(`${SLACK_API}/search.messages`, { query, count: 20, sort: 'timestamp' }, {
+        const searchResp = await postFormUrl(`${SLACK_API}/search.messages`, { query, count: 30, sort: 'timestamp' }, {
           headers: { ...auth },
         });
         const searchData = safeJsonParseBody(searchResp);
@@ -244,6 +249,10 @@ export async function scanSlackDirect(botToken) {
             // For a thread reply, thread_ts is the root; otherwise the message ts.
             const threadTs = match.thread_ts || match.ts;
             if (!channelId || !threadTs) continue;
+            // Latest message ts for the thread (Slack ts is epoch seconds).
+            const ts = match.thread_ts ? (match.thread_ts) : match.ts;
+            const tsSec = Number(ts);
+            if (!Number.isFinite(tsSec) || tsSec * 1000 < CUTOFF_MS) continue; // outside 24h
             const key = `slack:${channelId}:${threadTs}`;
             if (byKey.has(key)) continue;
             byKey.set(key, { match, channelId, threadTs });

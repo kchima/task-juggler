@@ -42,6 +42,11 @@ export function scanOpenCodeSessions({ dbPath = process.env.TASK_JUGGLER_OPENCOD
       return { sessions: [], stats: { source: 'opencode', present: true, reason: 'schema_mismatch' }, error: 'OpenCode schema tables missing/unexpected' };
     }
 
+const nowMs = Date.now();
+    const RECENT_MS = 24 * 60 * 60 * 1000;
+    // Only surface todos updated in the last 24h (either the todo itself or its
+    // session) — same temporal policy as every other source.
+    const cutoff = String(nowMs - RECENT_MS);
     const rows = conn.prepare(`
       SELECT
         s.id          AS session_id,
@@ -58,13 +63,14 @@ export function scanOpenCodeSessions({ dbPath = process.env.TASK_JUGGLER_OPENCOD
       JOIN session AS s ON s.id = t.session_id
       WHERE s.time_archived IS NULL
         AND t.status IN ('in_progress', 'pending')
+        AND (t.time_updated >= ? OR s.time_updated >= ?)
       ORDER BY
         CASE t.status WHEN 'in_progress' THEN 0 ELSE 1 END,
-        CASE t.priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+        CASE t.priority WHEN 'high' THEN 0 ELSE 1 END,
         t.time_updated DESC,
         s.time_updated DESC
       LIMIT ?
-    `).all(limit);
+    `).all(cutoff, cutoff, limit);
 
     const sessions = rows.map((r) => normalizeTodo(r));
     return {

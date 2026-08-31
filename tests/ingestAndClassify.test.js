@@ -37,6 +37,17 @@ describe('ingestService', () => {
     const b = contentHash(normalizeItem('linear', { key: 'k', label: 'same' }));
     expect(a).toBe(b);
   });
+
+  it('drops items older than 24h at the global ingest gate', () => {
+    const fresh = { key: 'slack:C1:1', label: 'new', updatedAt: new Date().toISOString() };
+    const old = { key: 'slack:C1:2', label: 'stale', updatedAt: new Date(Date.now() - 30 * 3600 * 1000).toISOString() };
+    const summary = ingestScanResults({ slack: { status: 'ok', items: [fresh, old] } });
+    expect(summary.slack.ingested).toBe(1);
+    expect(summary.slack.skippedOld).toBe(1);
+    const items = getAllSourceItems();
+    expect(items.some((i) => i.key === 'slack:C1:1')).toBe(true);
+    expect(items.some((i) => i.key === 'slack:C1:2')).toBe(false);
+  });
 });
 
 describe('classification', () => {

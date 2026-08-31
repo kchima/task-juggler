@@ -18,12 +18,21 @@ export function ingestScanResults(scanResults) {
     const items = Array.isArray(result && result.items) ? result.items : [];
     let ingested = 0;
     let skipped = 0;
+    let skippedOld = 0;
     for (const item of items) {
       if (!item || !item.key) { skipped++; continue; }
+      // Global 24h temporal gate: any item whose last activity is older than
+      // 24h is dropped here regardless of what the adapter returned. This is
+      // the single enforcement point for the "only recent work" policy.
+      const ts = item.modifiedAt || item.updatedAt || null;
+      if (ts && (Date.now() - new Date(ts).getTime()) > 24 * 60 * 60 * 1000) {
+        skippedOld++;
+        continue;
+      }
       upsertSourceItem(normalizeItem(sourceId, item));
       ingested++;
     }
-    summary[sourceId] = { status: result.status, ingested, skipped };
+    summary[sourceId] = { status: result.status, ingested, skipped, skippedOld };
   }
   return summary;
 }
