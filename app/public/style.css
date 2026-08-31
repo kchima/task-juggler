@@ -294,6 +294,21 @@ header h1 { font-size: 1.4rem; font-weight: 600; }
 }
 .conn-token-config.hidden { display: none; }
 
+/* Per-source on/off switch */
+.source-toggle { display: inline-flex; align-items: center; margin-left: 8px; cursor: pointer; position: relative; }
+.source-toggle input { display: none; }
+.toggle-slider {
+  width: 30px; height: 16px; border-radius: 8px;
+  background: var(--border, #444); position: relative; transition: background 0.15s;
+}
+.toggle-slider::after {
+  content: ''; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px;
+  border-radius: 50%; background: #fff; transition: transform 0.15s;
+}
+.source-toggle input:checked + .toggle-slider { background: #22c55e; }
+.source-toggle input:checked + .toggle-slider::after { transform: translateX(14px); }
+.source-entry.source-off { opacity: 0.55; }
+
 /* Classifier settings */
 .classifier-row {
   display: flex;

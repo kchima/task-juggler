@@ -12,6 +12,7 @@ import {
   getDirectAdaptersConfig,
 } from './directAdapters.js';
 import { getCredential } from '../auth/credentialStore.js';
+import { isSourceEnabled } from '../database.js';
 import { scanLocalSessions } from './localSessions.js';
 import { openCodeItems } from './openCodeSessions.js';
 
@@ -181,8 +182,13 @@ export async function scanAllSources(mcpClient = null, envConfig = {}) {
 
   const results = {};
 
+  // Per-source on/off switch: a disabled source is skipped entirely (no scan,
+  // no new items, no classification) but existing tasks are not deleted.
+  const off = (id) => ({ sourceId: id, status: 'off', items: [], errors: [], detected: [] });
+
   // --- Slack: MCP → direct token → MCP OAuth scan → unconfigured
-  if (mcpClient && mcpClient.hasTool('slack_search')) {
+  if (!isSourceEnabled('slack')) { results.slack = off('slack'); }
+  else if (mcpClient && mcpClient.hasTool('slack_search')) {
     results.slack = await tryMcpDiscovery('slack', mcpClient);
   } else if (direct.slack) {
     results.slack = await scanSlackDirect(direct.slack);
@@ -207,7 +213,8 @@ export async function scanAllSources(mcpClient = null, envConfig = {}) {
   }
 
   // --- Linear: MCP → direct token → MCP OAuth scan → unconfigured
-  if (mcpClient && (mcpClient.hasTool('list_issues') || mcpClient.hasTool('linear_list_issues'))) {
+  if (!isSourceEnabled('linear')) { results.linear = off('linear'); }
+  else if (mcpClient && (mcpClient.hasTool('list_issues') || mcpClient.hasTool('linear_list_issues'))) {
     results.linear = await tryMcpDiscovery('linear', mcpClient);
   } else if (direct.linear) {
     results.linear = await scanLinearDirect(direct.linear);
@@ -226,7 +233,8 @@ export async function scanAllSources(mcpClient = null, envConfig = {}) {
   }
 
   // --- Todoist: MCP → direct token → MCP OAuth scan → legacy OAuth → unconfigured
-  if (mcpClient && mcpClient.hasTool('todoist_find_tasks')) {
+  if (!isSourceEnabled('todoist')) { results.todoist = off('todoist'); }
+  else if (mcpClient && mcpClient.hasTool('todoist_find_tasks')) {
     results.todoist = await tryMcpDiscovery('todoist', mcpClient);
   } else if (direct.todoist) {
     results.todoist = await scanTodoistDirect(direct.todoist);
@@ -255,14 +263,16 @@ export async function scanAllSources(mcpClient = null, envConfig = {}) {
   }
 
   // --- Devin ---
-  if (direct.devin) {
+  if (!isSourceEnabled('devin')) { results.devin = off('devin'); }
+  else if (direct.devin) {
     results.devin = await scanDevinDirect(direct.devin, process.env.DEVIN_ORG_ID || null);
   } else {
     results.devin = scanResultUnconfigured('devin');
   }
 
   // --- Claude (local session discovery — read-only metadata) ---
-  try {
+  if (!isSourceEnabled('claude')) { results.claude = off('claude'); }
+  else try {
     const { sessions, stats } = scanLocalSessions();
     const result = emptyScanResult('claude');
     result.status = sessions.length > 0 ? 'ok' : 'ok';
@@ -271,6 +281,9 @@ export async function scanAllSources(mcpClient = null, envConfig = {}) {
       label: `${s.title}${s.cwd ? ` (${pathShortName(s.cwd)})` : ''}${s.status === 'in_progress' ? ' ●' : ''}`,
       url: null,
       status: s.status,
+      // Top-level modifiedAt so ingest's sourceUpdatedAt is set and the 24h
+      // "changed recently" window works.
+      modifiedAt: s.modifiedAt || s.startedAt || null,
       // Give the classifier real signal: title, cwd, model, recency.
       title: s.title,
       raw: {
@@ -292,7 +305,8 @@ export async function scanAllSources(mcpClient = null, envConfig = {}) {
   }
 
   // --- OpenCode (local session/todo discovery — read-only metadata) ---
-  try {
+  if (!isSourceEnabled('opencode')) { results.opencode = off('opencode'); }
+  else try {
     const oc = openCodeItems();
     const result = emptyScanResult('opencode');
     if (oc.error) {

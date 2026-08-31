@@ -678,3 +678,18 @@ export function setSetting(key, value) {
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
   `).run(key, String(value));
 }
+
+/** Whether a source is enabled for scanning. Defaults to true (enabled). */
+export function isSourceEnabled(sourceType) {
+  const v = getSetting(`source.${sourceType}.enabled`);
+  return v == null ? true : v !== 'false';
+}
+
+/** Persist a source's enabled state. */
+export function setSourceEnabled(sourceType, enabled) {
+  const conn = getDb();
+  conn.prepare(`
+    INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+  `).run(`source.${sourceType}.enabled`, enabled ? 'true' : 'false');
+}

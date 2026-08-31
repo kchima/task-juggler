@@ -3,7 +3,7 @@ import { prioritize } from './scoring.js';
 
 const API_BASE = '/api';
 
-let state = { tasks: [], tree: [], counts: {}, selected: new Set(), sources: null, connections: {}, classifier: null };
+let state = { tasks: [], tree: [], counts: {}, selected: new Set(), sources: null, connections: {}, classifier: null, sourceEnabled: {} };
 
 // ─── Provider metadata ────────────────────────────────────────────────────
 const PROVIDERS = {
@@ -127,6 +127,12 @@ async function loadConnections() {
   try {
     const data = await api('/auth/status');
     state.connections = data.statuses || {};
+    // Per-source enabled/disabled switches (persisted server-side).
+    state.sourceEnabled = state.sourceEnabled || {};
+    try {
+      const src = await api('/sources/status');
+      state.sourceEnabled = src.enabled || {};
+    } catch {}
 
     // Also check which providers have app credentials configured (e.g. Slack)
     for (const providerId of ['slack', 'linear', 'todoist', 'devin']) {
@@ -401,6 +407,19 @@ async function handleClassifierEnabled(enabled) {
   state.classifier = { ...state.classifier, enabled };
 }
 
+async function toggleSourceEnabled(sourceId, enabled) {
+  state.sourceEnabled[sourceId] = enabled;
+  renderSourcesPanel();
+  try {
+    await api(`/sources/${sourceId}/toggle`, { method: 'POST', body: JSON.stringify({ enabled }) });
+    showToast(`${sourceId} ${enabled ? 'enabled' : 'paused'}`, 'success');
+  } catch (err) {
+    state.sourceEnabled[sourceId] = !enabled; // revert
+    renderSourcesPanel();
+    showToast(`Could not ${enabled ? 'enable' : 'pause'} ${sourceId}: ${err.message}`, 'error');
+  }
+}
+
 async function handleClassifyNow() {
   const btn = document.getElementById('classifierRun');
   if (btn) { btn.disabled = true; btn.textContent = '▷ Classifying…'; }
@@ -636,11 +655,16 @@ function renderSourceEntry(provider, conn, scanResult) {
     `;
   }
 
+  const isEnabled = state.sourceEnabled[provider.id] !== false;
   return `
-    <div class="source-entry" data-source="${provider.id}">
+    <div class="source-entry ${isEnabled ? '' : 'source-off'}" data-source="${provider.id}">
       <div class="source-icon-label" style="${provider.color ? `--provider-color: ${provider.color}` : ''}">
         <span class="source-icon">${provider.icon}</span>
         <span class="source-name">${provider.name}</span>
+        <label class="source-toggle" title="${isEnabled ? 'On — scanning this source' : 'Off — not scanning this source'}">
+          <input type="checkbox" data-source-toggle="${provider.id}" ${isEnabled ? 'checked' : ''}>
+          <span class="toggle-slider"></span>
+        </label>
       </div>
       <div class="source-items">
         ${actionHtml}
@@ -761,6 +785,12 @@ function setupEventListeners() {
 
   // Connection OAuth handlers
   document.addEventListener('click', (e) => {
+    const toggle = e.target.closest('[data-source-toggle]');
+    if (toggle) {
+      toggleSourceEnabled(toggle.dataset.sourceToggle, toggle.checked);
+      return;
+    }
+
     const connectBtn = e.target.closest('[data-connect]');
     if (connectBtn) {
       handleConnect(connectBtn.dataset.connect);

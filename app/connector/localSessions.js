@@ -270,11 +270,22 @@ export function scanLocalSessions() {
   // Sort by modifiedAt descending (most recent first)
   all.sort((a, b) => (b.modifiedAt || b.startedAt || 0) - (a.modifiedAt || a.startedAt || 0));
 
+  // Only surface sessions active in the last 24h — this is a "what's current"
+  // in-flight work surface, not an archive browser. Sessions with no usable
+  // timestamp are kept (some sources only give status) but at least are sorted.
+  const now = Date.now();
+  const RECENT_MS = 24 * 60 * 60 * 1000;
+  const recent = all.filter((s) => {
+    const t = s.modifiedAt || s.startedAt;
+    return !t || (now - t) < RECENT_MS;
+  });
+
   // Summary stats
   const stats = {
-    total: all.length,
-    active: all.filter((s) => s.status === 'in_progress').length,
-    completed: all.filter((s) => s.status === 'completed').length,
+    total: recent.length,
+    active: recent.filter((s) => s.status === 'in_progress').length,
+    completed: recent.filter((s) => s.status === 'completed').length,
+    skippedOld: all.length - recent.length,
     bySource: {
       'claude-config': configSessions.length,
       'claude-session-file': sessionFiles.length,
@@ -282,7 +293,7 @@ export function scanLocalSessions() {
     },
   };
 
-  return { sessions: all, stats };
+  return { sessions: recent, stats };
 }
 
 /**

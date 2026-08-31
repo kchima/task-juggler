@@ -13,6 +13,7 @@ import {
   countByStatus, closeDb, getDescendantIds,
   getAllSourceItems, dismissSourceItem, removeDismissSourceItem,
   linkSourceItemToTask, getJobStates, getPendingJobCount,
+  isSourceEnabled, setSourceEnabled,
 } from './database.js';
 import { scanAllSources, checkMcpCapabilities } from './connector/scanner.js';
 import { ingestAndQueue } from './ingestService.js';
@@ -766,10 +767,29 @@ app.get('/api/sources/keys', (_req, res) => {
 app.get('/api/sources/status', (_req, res) => {
   const mcpClient = getOrCreateMcpClient();
   const mcpStatus = checkMcpCapabilities(mcpClient);
+  const sourceOrder = ['todoist', 'slack', 'linear', 'devin', 'claude', 'opencode'];
+  // Per-source enabled state (for the on/off switches).
+  const enabled = {};
+  for (const id of sourceOrder) enabled[id] = isSourceEnabled(id);
   res.json({
     mcp: mcpStatus,
-    sourceOrder: ['todoist', 'slack', 'linear', 'devin', 'claude', 'opencode'],
+    sourceOrder,
+    enabled,
   });
+});
+
+/**
+ * POST /api/sources/:source/toggle
+ * Turn a source's scanning on/off. Disabled sources are skipped on refresh but
+ * existing tasks are retained.
+ * Body: { enabled: boolean }
+ */
+app.post('/api/sources/:source/toggle', (req, res) => {
+  const { source } = req.params;
+  const { enabled } = req.body || {};
+  if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be a boolean' });
+  setSourceEnabled(source, enabled);
+  res.json({ ok: true, source, enabled: isSourceEnabled(source) });
 });
 
 // Configure an MCP server connection

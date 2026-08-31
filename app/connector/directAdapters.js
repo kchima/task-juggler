@@ -220,12 +220,14 @@ export async function scanSlackDirect(botToken) {
       return result;
     }
 
-    // Two simple queries (Slack search doesn't reliably support boolean OR):
-    // threads directed at the user, and threads the user started. Both use the
-    // same dedupe map below. `after:` requires an actual YYYY-MM-DD date — the
-    // word "yesterday" is rejected by Slack with invalid_arguments.
-    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    const queries = [`is:thread to:me after:${yesterday}`, `is:thread from:me after:${yesterday}`];
+    // DMs + threads modified in the last 24h. Slack's `after:` is date-granular,
+    // so use today's date as the floor, plus `in:im` to target direct messages.
+    const today = new Date().toISOString().slice(0, 10);
+    const queries = [
+      `is:thread in:im after:${today}`,
+      `is:thread to:me after:${today}`,
+      `is:thread from:me after:${today}`,
+    ];
     const byKey = new Map();
 
     for (const query of queries) {
