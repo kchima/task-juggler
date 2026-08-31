@@ -9,7 +9,7 @@
 
 import { processNextJobs, enqueueDueJobs } from './ai/classification.js';
 import { getAiConfig, isAiConfigured } from './ai/openRouterClient.js';
-import { getTodayCompletedCostUsd } from './database.js';
+import { getTodayCompletedCostUsd, purgeOldPendingJobs } from './database.js';
 import { keepAliveAllMcpGrants } from './connector/mcpOAuthClient.js';
 
 let _timer = null;
@@ -29,7 +29,12 @@ export async function tick({ config = getAiConfig(), batchSize } = {}) {
   let keepAlive = null;
   try { keepAlive = await keepAliveAllMcpGrants(); } catch {}
 
-  if (!config.enabled) return { ok: false, reason: 'disabled', processed: 0, keepAlive };
+  // Auto-prune stale unprocessed jobs (older than 24h) so the backlog can't
+  // grow unbounded. Success-kept dedup stays intact.
+  let pruned = 0;
+  try { pruned = purgeOldPendingJobs(); } catch {}
+
+  if (!config.enabled) return { ok: false, reason: 'disabled', processed: 0, keepAlive, pruned };
   if (!isAiConfigured(config)) return { ok: false, reason: 'not_configured', processed: 0, keepAlive };
 
   _busy = true;

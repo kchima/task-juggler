@@ -610,6 +610,35 @@ export function getPendingJobCount() {
 }
 
 /**
+ * Purge pending/leased/retryable jobs older than `maxAgeMs`. Unprocessed jobs
+ * are just work that hasn't run — dropping them loses nothing and they will be
+ * re-queued if the same thread reappears after a scan (content-hash uniqueness
+ * only blocks identical *succeeded* judgment). Succeeded jobs are kept so a
+ * later unchanged re-scan is correctly deduped.
+ */
+export function purgeOldPendingJobs({ maxAgeMs = 24 * 60 * 60 * 1000, now = new Date() } = {}) {
+  const conn = getDb();
+  const cutoff = new Date(now.getTime() - maxAgeMs).toISOString();
+  const r = conn.prepare(`
+    DELETE FROM classification_jobs
+    WHERE state IN ('pending','leased','retryable_failed')
+      AND created_at <= ?
+  `).run(cutoff);
+  return r.changes;
+}
+
+/**
+ * Drop ALL pending/leased/retryable jobs (manual "clear backlog").
+ * Succeeded jobs are kept so dedup still works for already-judged content.
+ * Returns the number removed.
+ */
+export function clearPendingJobs() {
+  const conn = getDb();
+  const r = conn.prepare("DELETE FROM classification_jobs WHERE state IN ('pending','leased','retryable_failed')").run();
+  return r.changes;
+}
+
+/**
  * Return the most recent SUCCEEDED verdict for a source key whose content hash
  * differs from `currentHash` (i.e. the last judgment before this content
  * version). Used to give the classifier prior context so reclassification is

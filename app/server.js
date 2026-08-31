@@ -13,7 +13,7 @@ import {
   countByStatus, closeDb, getDescendantIds,
   getAllSourceItems, dismissSourceItem, removeDismissSourceItem,
   linkSourceItemToTask, getJobStates, getPendingJobCount,
-  isSourceEnabled, setSourceEnabled,
+  isSourceEnabled, setSourceEnabled, clearPendingJobs, purgeOldPendingJobs,
 } from './database.js';
 import { scanAllSources, checkMcpCapabilities } from './connector/scanner.js';
 import { ingestAndQueue } from './ingestService.js';
@@ -224,7 +224,6 @@ let _modelCache = {};
  * Never exposes keys.
  */
 app.get('/api/classify/config', (_req, res) => {
-  // Re-read persisted prefs from the DB so the UI never sees a stale cache.
   try { loadClassifierPrefs(); } catch {}
   const cfg = getAiConfig();
   res.json({
@@ -239,6 +238,24 @@ app.get('/api/classify/config', (_req, res) => {
     pendingJobs: getPendingJobCount(),
     jobStates: getJobStates(),
   });
+});
+
+/**
+ * POST /api/classify/clear
+ * Drop the unprocessed backlog (pending/leased/retryable). Succeeded jobs are
+ * kept so re-classification dedup still works; source items are untouched, so
+ * a thread reappearing after a scan is re-queued rather than excluded.
+ * Body: { olderThanHours? } — if provided, only clears jobs older than this.
+ */
+app.post('/api/classify/clear', (req, res) => {
+  const hours = Number(req.body && req.body.olderThanHours);
+  let removed;
+  if (Number.isFinite(hours) && hours > 0) {
+    removed = purgeOldPendingJobs({ maxAgeMs: hours * 3600 * 1000 });
+  } else {
+    removed = clearPendingJobs();
+  }
+  res.json({ ok: true, removed, pendingJobs: getPendingJobCount() });
 });
 
 /**

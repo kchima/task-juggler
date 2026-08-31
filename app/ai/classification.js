@@ -291,7 +291,14 @@ export async function enqueueDueJobs({ respectEnabled = true } = {}) {
   const items = getAllSourceItems({ includeDismissed: false });
   let enqueued = 0;
   let alreadyJudged = 0;
+  let skippedOld = 0;
+  const NOW = Date.now();
+  const RECENT_MS = 24 * 60 * 60 * 1000;
   for (const item of items) {
+    // Temporal rule: only queue items whose last activity is within 24h. Stale
+    // source_items from before the 24h gate existed must not become candidates.
+    const ts = item.sourceUpdatedAt;
+    if (ts && (NOW - new Date(ts).getTime()) > RECENT_MS) { skippedOld++; continue; }
     const res = enqueueClassificationJob({
       sourceType: item.sourceType,
       sourceKey: item.key,
@@ -302,7 +309,7 @@ export async function enqueueDueJobs({ respectEnabled = true } = {}) {
     if (res.created) enqueued++;
     else if (res.alreadyClassified) alreadyJudged++;
   }
-  return { ok: true, enqueued, alreadyJudged, candidates: items.length, skippedUnchanged: alreadyJudged };
+  return { ok: true, enqueued, alreadyJudged, skippedOld, candidates: items.length, skippedUnchanged: alreadyJudged };
 }
 
 /**
