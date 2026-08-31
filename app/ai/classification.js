@@ -120,11 +120,21 @@ export function buildUserPromptWithPrior(sourceItem, currentHash) {
  * verdict. Throws on malformed/out-of-contract output so callers retry.
  */
 export function parseVerdict(content) {
+  const text = String(content || '').trim();
   let parsed;
   try {
-    parsed = JSON.parse(content);
+    parsed = JSON.parse(text);
   } catch {
-    throw new Error('Verdict was not valid JSON');
+    // Model sometimes wraps the JSON in prose or other text — find the first
+    // balanced {...} and try again.
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      try { parsed = JSON.parse(text.slice(start, end + 1)); }
+      catch { throw new Error('Verdict was not valid JSON'); }
+    } else {
+      throw new Error('Verdict was not valid JSON');
+    }
   }
   const verdict = {
     actionable: parsed.actionable === true,
