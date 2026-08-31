@@ -116,7 +116,17 @@ export function openCodeItems({ dbPath, limit } = {}) {
       status: s.status,
       priority: s.priority,
       url: null,
-      raw: { sessionTitle: s.sessionTitle, cwd: s.cwd },
+      // Everything the classifier needs to judge whether this todo is active
+      // work needing the user: the todo text, its explicit state, and context.
+      title: s.title,
+      raw: {
+        todoText: s.title,
+        todoStatus: s.status,
+        todoPriority: s.priority,
+        sessionTitle: s.sessionTitle,
+        cwd: s.cwd,
+        modifiedAt: s.modifiedAt,
+      },
     })),
   };
 }

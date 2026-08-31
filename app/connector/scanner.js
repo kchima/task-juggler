@@ -271,6 +271,15 @@ export async function scanAllSources(mcpClient = null, envConfig = {}) {
       label: `${s.title}${s.cwd ? ` (${pathShortName(s.cwd)})` : ''}${s.status === 'in_progress' ? ' ●' : ''}`,
       url: null,
       status: s.status,
+      // Give the classifier real signal: title, cwd, model, recency.
+      title: s.title,
+      raw: {
+        sessionTitle: s.title,
+        cwd: s.cwd,
+        model: s.models && s.models[0],
+        status: s.status,
+        modifiedAt: s.modifiedAt || s.startedAt,
+      },
     }));
     result.detected = result.items.map((i) => ({ key: i.key, label: i.label, outcome: 'discovered' }));
     if (stats.total > 0) {

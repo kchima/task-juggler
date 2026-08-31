@@ -11,7 +11,10 @@ import {
 import { classifyItem, getAiConfig, isAiConfigured } from './openRouterClient.js';
 
 export const CLASSIFIER_POLICY_VERSION = 1;
-export const CLASSIFIER_PROMPT_VERSION = 1;
+// Bumped because the system/user prompts changed significantly (more context +
+// less conservative actionable bias). Job uniqueness includes prompt_version,
+// so bumping forces a fresh judgment of already-classified items.
+export const CLASSIFIER_PROMPT_VERSION = 2;
 
 export const STATUS_INTERNAL = {
   not_started: 'not_started',
@@ -46,15 +49,17 @@ export const CLASSIFICATION_SCHEMA = {
 export function buildSystemPrompt() {
   return [
     'You are the triage brain for a task manager called Task Juggler.',
-    'You read a single candidate item from a connected system and decide whether it is real,',
+    'You read a single candidate item from a connected system and decide whether it reflects real,',
     'actionable, in-progress work the user still needs.',
     'Answer ONLY with the exact JSON object described by the schema.',
     'Key rules:',
-    '- "actionable" must be true only when the item genuinely requires or reflects user action. Do not over-classify.',
+    '- "actionable" true means this is work the user has in flight (in progress) or that needs a',
+    '  decision/follow-up. Prefer actionable for items whose status is "in_progress" or whose',
+    '  metadata records active/pending work. Only "no_action" genuinely resolved/finished items.',
     '- status "waiting_for_other" means a human is waiting on someone else;',
     '  "waiting_for_ai" means work is paused waiting on an AI/agent to finish.',
     '- "ballInUsersCourt" true when the user is the responsible human who must act next.',
-    '- When the item is done, stale, or duplicates an already-finished state, use status "completed"',
+    '- When the item is done, stale, or a duplicate of finished state, use status "completed"',
     '  or "no_action" and set actionable false.',
     '- summary should be a concise actionable title (<=200 chars).',
     '- priority is one of urgent|high|medium|low.',
@@ -62,15 +67,26 @@ export function buildSystemPrompt() {
 }
 
 export function buildUserPrompt(sourceItem) {
-  const raw = typeof sourceItem.raw === 'object' ? JSON.stringify(sourceItem.raw) : (sourceItem.raw || '');
-  return [
+  const raw = sourceItem.raw && typeof sourceItem.raw === 'object' ? sourceItem.raw : null;
+  const lines = [
     `Source type: ${sourceItem.sourceType}`,
     `Title: ${sourceItem.title}`,
-    sourceItem.description ? `Description: ${sourceItem.description}` : null,
-    sourceItem.status ? `Source status: ${sourceItem.status}` : null,
-    sourceItem.priority ? `Source priority: ${sourceItem.priority}` : null,
-    raw ? `Raw context: ${raw.slice(0, 2000)}` : null,
-  ].filter(Boolean).join('\n');
+  ];
+  if (sourceItem.description) lines.push(`Description: ${sourceItem.description}`);
+  if (sourceItem.status) lines.push(`Source status: ${sourceItem.status}`);
+  if (sourceItem.priority) lines.push(`Source priority: ${sourceItem.priority}`);
+  // Present structured metadata as human-readable signals the model can weigh.
+  if (raw) {
+    for (const [k, v] of Object.entries(raw)) {
+      if (v != null && v !== '' && v !== false && v !== 0) {
+        lines.push(`${k.replace(/([A-Z])/g, ' $1').trim()}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
+      }
+    }
+  } else if (sourceItem.raw) {
+    const s = String(sourceItem.raw);
+    if (s) lines.push(`Raw context: ${s.slice(0, 2000)}`);
+  }
+  return lines.filter(Boolean).join('\n');
 }
 
 /**
