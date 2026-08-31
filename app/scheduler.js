@@ -10,6 +10,7 @@
 import { processNextJobs, enqueueDueJobs } from './ai/classification.js';
 import { getAiConfig, isAiConfigured } from './ai/openRouterClient.js';
 import { getTodayCompletedCostUsd } from './database.js';
+import { keepAliveAllMcpGrants } from './connector/mcpOAuthClient.js';
 
 let _timer = null;
 let _busy = false;
@@ -22,18 +23,24 @@ const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
  */
 export async function tick({ config = getAiConfig(), batchSize } = {}) {
   if (_busy) return { ok: false, reason: 'busy', processed: 0 };
-  if (!config.enabled) return { ok: false, reason: 'disabled', processed: 0 };
-  if (!isAiConfigured(config)) return { ok: false, reason: 'not_configured', processed: 0 };
+
+  // Keep OAuth grants from expiring while the app is running, even when no
+  // scan triggers. This is what avoids "re-authorize every day".
+  let keepAlive = null;
+  try { keepAlive = await keepAliveAllMcpGrants(); } catch {}
+
+  if (!config.enabled) return { ok: false, reason: 'disabled', processed: 0, keepAlive };
+  if (!isAiConfigured(config)) return { ok: false, reason: 'not_configured', processed: 0, keepAlive };
 
   _busy = true;
   try {
     await enqueueDueJobs();
     const remaining = budgetRemainingUsd(config);
-    if (remaining <= 0) return { ok: false, reason: 'daily_budget_exhausted', processed: 0, remaining };
+    if (remaining <= 0) return { ok: false, reason: 'daily_budget_exhausted', processed: 0, remaining, keepAlive };
 
     const size = Math.max(1, Math.min(batchSize || Number(process.env.TASK_JUGGLER_CLASSIFY_BATCH || 5), 20));
     const processed = await processNextJobs({ limit: size, config });
-    return { ok: processed.ok, processed: processed.processed, outcomes: processed.outcomes, remaining };
+    return { ok: processed.ok, processed: processed.processed, outcomes: processed.outcomes, remaining, keepAlive };
   } finally {
     _busy = false;
   }

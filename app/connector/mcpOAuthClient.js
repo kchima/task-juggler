@@ -706,7 +706,17 @@ export async function disconnectMcpProvider(providerId) {
 /**
  * Refresh an MCP OAuth token.
  */
+const _refreshInFlight = new Map();
 export async function refreshMcpToken(providerId) {
+  // Serialize refreshes per provider so two paths (keep-alive + scan) can't
+  // race a rotating refresh token (Slack/others revoke the old token on use).
+  if (_refreshInFlight.has(providerId)) return _refreshInFlight.get(providerId);
+  const promise = doRefreshMcpToken(providerId).finally(() => { _refreshInFlight.delete(providerId); });
+  _refreshInFlight.set(providerId, promise);
+  return promise;
+}
+
+async function doRefreshMcpToken(providerId) {
   const grant = getCredential(`${providerId}-mcp-grant`);
   if (!grant || !grant.refreshToken) return null;
 
@@ -748,6 +758,44 @@ export async function refreshMcpToken(providerId) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Refresh an MCP OAuth token early if it is expired or about to expire, so the
+ * connection survives even when the app hasn't scanned for a while. Keeps the
+ * token from lapsing into a dead/consumed refresh token that forces re-auth.
+ */
+export async function refreshMcpTokenIfNeeded(providerId, { nearExpiryMs = 5 * 60 * 1000, now = new Date(), refreshFn } = {}) {
+  const grant = getCredential(`${providerId}-mcp-grant`);
+  if (!grant || !grant.accessToken) return { providerId, needed: false, reason: 'no-grant' };
+  if (!grant.refreshToken) return { providerId, needed: false, reason: 'no-refresh' };
+  if (!grant.expiresIn) return { providerId, needed: false, reason: 'no-expiry' };
+
+  const expiresAt = grant.obtainedAt + grant.expiresIn * 1000;
+  if (now.getTime() < expiresAt - nearExpiryMs) {
+    return { providerId, needed: false, reason: 'fresh' };
+  }
+
+  const refreshed = await (refreshFn || refreshMcpToken)(providerId);
+  return refreshed
+    ? { providerId, needed: true, ok: true }
+    : { providerId, needed: true, ok: false, reason: 'refresh-failed' };
+}
+
+/**
+ * Best-effort keep-alive for all connected MCP OAuth sources. Safe no-op for
+ * sources that aren't connected or don't need refresh yet.
+ */
+export async function keepAliveAllMcpGrants({ providers = Object.keys(MCP_ENDPOINTS) } = {}) {
+  const results = {};
+  for (const providerId of providers) {
+    try {
+      results[providerId] = await refreshMcpTokenIfNeeded(providerId);
+    } catch (err) {
+      results[providerId] = { providerId, needed: false, ok: false, reason: err.message };
+    }
+  }
+  return results;
 }
 
 // ─── MCP endpoint configurations for known providers ───────────────────────
