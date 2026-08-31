@@ -53,6 +53,12 @@ export function normalizeItem(sourceId, item) {
 /**
  * Stable, normalized content hash — used to detect whether a source item has
  * changed since it was last classified (skip unchanged content).
+ *
+ * IMPORTANT: only *content* that determines the verdict should affect the hash.
+ * Volatile metadata (timestamps, recency, statuses that change every scan)
+ * MUST NOT be in here, or unchanged threads get re-classified on every scan and
+ * the credits bill grows unboundedly. `raw` is normalized to a stable string
+ * (excluding keys like modifiedAt/updatedAt/createdAt/lastSeen).
  */
 export function contentHash(fields) {
   const norm = JSON.stringify({
@@ -61,9 +67,26 @@ export function contentHash(fields) {
     description: fields.description,
     status: fields.status,
     priority: fields.priority,
-    raw: fields.raw,
+    raw: stableRaw(fields.raw),
   });
   return createHash('sha256').update(norm).digest('hex');
+}
+
+/** Exclude volatile metadata keys from the hash-relevant raw context. */
+const VOLATILE_RAW_KEYS = /^(modifiedAt|updatedAt|createdAt|lastSeenAt|firstSeenAt|sessionUpdatedAt)$/i;
+function stableRaw(raw) {
+  if (raw == null) return raw;
+  if (typeof raw === 'string') return raw;
+  if (Array.isArray(raw)) return raw.map(stableRaw);
+  if (typeof raw === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(raw)) {
+      if (VOLATILE_RAW_KEYS.test(k)) continue;
+      out[k] = stableRaw(v);
+    }
+    return out;
+  }
+  return raw;
 }
 
 /**

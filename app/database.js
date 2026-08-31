@@ -530,15 +530,18 @@ export function enqueueClassificationJob({ sourceType, sourceKey, contentHash, p
   `).get(sourceType, sourceKey, contentHash, policyVersion, promptVersion);
 
   if (existing) {
-    // If previously succeeded/terminal, keep it. If pending/leased/retryable, re-use.
-    return { job: rowToJob(existing), created: false };
+    // If it already succeeded (or terminally failed), this exact content has
+    // already been judged — do NOT re-enqueue. Signal `alreadyClassified` so
+    // callers can distinguish "skip, unchanged" from "pending in queue".
+    const alreadyClassified = existing.state === 'succeeded' || existing.state === 'terminal_failed';
+    return { job: rowToJob(existing), created: false, alreadyClassified };
   }
 
   conn.prepare(`
     INSERT INTO classification_jobs (id, source_type, source_key, content_hash, policy_version, prompt_version, state)
     VALUES (?, ?, ?, ?, ?, ?, 'pending')
   `).run(id, sourceType, sourceKey, contentHash, policyVersion, promptVersion);
-  return { job: rowToJob(conn.prepare('SELECT * FROM classification_jobs WHERE id = ?').get(id)), created: true };
+  return { job: rowToJob(conn.prepare('SELECT * FROM classification_jobs WHERE id = ?').get(id)), created: true, alreadyClassified: false };
 }
 
 /**
